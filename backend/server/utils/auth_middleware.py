@@ -23,6 +23,7 @@ PUBLIC_PATHS = [
     r"^/api$",  # Health Check
     r"^/api/system/health$",  # Health Check
     r"^/api/system/info$",  # 获取系统信息配置
+    r"^/api/chat/public/.*$",  # 无需登录的公开聊天接口
 ]
 
 
@@ -166,3 +167,14 @@ def is_public_path(path: str) -> bool:
         if re.match(pattern, path):
             return True
     return False
+
+
+# 获取可选的用户信息（不强制登录）
+async def get_optional_user(
+    authorization: str | None = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await get_current_user(authorization, db)
+    except HTTPException:
+        return None

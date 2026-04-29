@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import User
 from server.routers.auth_router import get_admin_user
-from server.utils.auth_middleware import get_db, get_required_user
+from server.utils.auth_middleware import get_db, get_required_user, get_optional_user
 from yuxi import config as conf
 from yuxi.agents.buildin import agent_manager
 from yuxi.models import select_model
@@ -982,3 +982,96 @@ async def upload_image(file: UploadFile = File(...), current_user: User = Depend
     except Exception as e:
         logger.error(f"图片上传处理失败: {str(e)}, {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"图片处理失败: {str(e)}")
+
+
+# =============================================================================
+# > === 无需登录的公开接口分组 ===
+# =============================================================================
+
+
+@chat.post("/public/call")
+async def public_call(query: str = Body(...), meta: dict = Body(None), current_user: User | None = Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """无需登录的公开问答接口"""
+    meta = meta or {}
+
+    # 确保 request_id 存在
+    if "request_id" not in meta or not meta.get("request_id"):
+        meta["request_id"] = str(uuid.uuid4())
+
+    try:
+        # 获取默认智能体ID
+        default_agent_id = conf.default_agent_id
+        if not default_agent_id:
+            agents = await agent_manager.get_agents_info(include_configurable_items=False)
+            if agents:
+                default_agent_id = agents[0].get("id", "")
+
+        if not default_agent_id:
+            raise ValueError("无可用智能体")
+
+        # 获取默认管理员用户（假设ID为1）
+        from sqlalchemy import select
+        admin_user = await db.execute(select(User).where(User.id == 1))
+        admin_user = admin_user.scalar_one_or_none()
+
+        if not admin_user:
+            # 如果没有ID为1的用户，获取第一个用户
+            admin_user = await db.execute(select(User).limit(1))
+            admin_user = admin_user.scalar_one_or_none()
+
+        if not admin_user:
+            raise ValueError("无可用管理员用户")
+
+        # 获取或创建默认智能体配置
+        agent_config_repo = AgentConfigRepository(db)
+        config_item = await agent_config_repo.get_or_create_default(
+            department_id=admin_user.department_id,
+            agent_id=default_agent_id,
+            created_by=str(admin_user.id)
+        )
+
+        # 使用智能体配置进行对话
+        result = await agent_chat(
+            query=query,
+            agent_config_id=config_item.id,
+            thread_id=None,
+            meta=meta,
+            image_content=None,
+            current_user=admin_user,
+            db=db
+        )
+
+        if result.get("status") == "finished":
+            return {"response": result.get("response"), "request_id": meta["request_id"]}
+        else:
+            error_message = result.get("error_message", "处理请求时出错")
+            logger.error(f"Public chat error: {error_message}")
+            return {"response": f"抱歉，处理您的请求时出错：{error_message}", "request_id": meta["request_id"]}
+
+    except Exception as e:
+        logger.error(f"Public chat error: {e}")
+        return {"response": f"抱歉，处理您的请求时出错：{str(e)}", "request_id": meta["request_id"]}
+
+
+@chat.get("/public/default_agent")
+async def public_get_default_agent():
+    """无需登录的默认智能体获取接口"""
+    try:
+        default_agent_id = conf.default_agent_id
+        # 如果没有设置默认智能体，尝试获取第一个可用的智能体
+        if not default_agent_id:
+            agents = await agent_manager.get_agents_info(include_configurable_items=False)
+            if agents:
+                default_agent_id = agents[0].get("id", "")
+
+        return {"default_agent_id": default_agent_id}
+    except Exception as e:
+        logger.error(f"获取默认智能体出错: {e}")
+        raise HTTPException(status_code=500, detail=f"获取默认智能体出错: {str(e)}")
+
+
+@chat.get("/public/agents")
+async def public_get_agents():
+    """无需登录的智能体列表获取接口"""
+    agents_info = await agent_manager.get_agents_info(include_configurable_items=False)
+    return {"agents": agents_info}

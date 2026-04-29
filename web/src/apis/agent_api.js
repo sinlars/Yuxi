@@ -271,6 +271,28 @@ export const multimodalApi = {
 // === 对话线程分组 ===
 // =============================================================================
 
+// 公开API模块（无需登录）
+export const publicChatApi = {
+  /**
+   * 无需登录的简单聊天调用
+   * @param {string} query - 查询内容
+   * @returns {Promise} - 聊天响应
+   */
+  publicCall: (query) => apiPost('/api/chat/public/call', { query }, {}, false),
+
+  /**
+   * 无需登录的默认智能体获取
+   * @returns {Promise} - 默认智能体信息
+   */
+  getDefaultAgent: () => apiGet('/api/chat/public/default_agent', {}, false),
+
+  /**
+   * 无需登录的智能体列表获取
+   * @returns {Promise} - 智能体列表
+   */
+  getAgents: () => apiGet('/api/chat/public/agents', {}, false)
+}
+
 export const threadApi = {
   /**
    * 获取对话线程列表

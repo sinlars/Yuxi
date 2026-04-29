@@ -120,6 +120,12 @@ const router = createRouter({
       redirect: '/extensions'
     },
     {
+      path: '/public-chat',
+      name: 'PublicChat',
+      component: () => import('../views/PublicChatView.vue'),
+      meta: { requiresAuth: false }
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'NotFound',
       component: () => import('../views/EmptyView.vue'),
