@@ -19,13 +19,6 @@
       </div>
       <div class="detail-actions">
         <a-space :size="8">
-          <span
-            v-if="currentSkillStatusLabel"
-            class="panel-status-chip"
-            :class="{ warning: currentSkillStatusTone === 'warning' }"
-          >
-            {{ currentSkillStatusLabel }}
-          </span>
           <button
             v-if="currentSkill?.is_builtin_spec && currentSkill?.status === 'not_installed'"
             type="button"
@@ -328,10 +321,6 @@ const currentSkillStatusLabel = computed(() => {
   }
   if (skill.is_builtin) return '已安装'
   return '已上传'
-})
-
-const currentSkillStatusTone = computed(() => {
-  return currentSkill.value?.status === 'update_available' ? 'warning' : 'default'
 })
 
 const canSave = computed(() => {
@@ -724,7 +713,7 @@ onMounted(() => {
   flex-shrink: 0;
 
   .tree-header {
-    padding: 10px 12px 0;
+    padding: 10px var(--page-padding) 0;
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -757,7 +746,7 @@ onMounted(() => {
     flex: 1;
     overflow-y: auto;
     height: 100%;
-    padding: 8px 0;
+    padding: 8px calc(var(--page-padding) - 4px);
   }
 }
 
