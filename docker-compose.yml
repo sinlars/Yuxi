@@ -2,6 +2,7 @@ x-api-worker-env: &api-worker-env
   HOST_IP: ${HOST_IP:-}
   LITE_MODE: ${LITE_MODE:-false}
   RUNNING_IN_DOCKER: "true"
+  YUXI_ENV: development
   MODEL_DIR_IN_DOCKER: /models
   # DBs and other services
   POSTGRES_URL: ${POSTGRES_URL:-postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-yuxi_know}}
@@ -39,7 +40,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
-    image: yuxi-api:${YUXI_VERSION:-0.6.2}
+    image: yuxi-api:${YUXI_VERSION:-0.6.2.dev1}
     container_name: api-dev
     working_dir: /app
     volumes:
@@ -87,7 +88,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
-    image: yuxi-api:${YUXI_VERSION:-0.6.2}
+    image: yuxi-api:${YUXI_VERSION:-0.6.2.dev1}
     container_name: worker-dev
     working_dir: /app
     volumes:
@@ -126,7 +127,7 @@ services:
     build:
       context: ./docker/sandbox_provisioner
       dockerfile: Dockerfile
-    image: yuxi-sandbox-provisioner:${YUXI_VERSION:-0.6.2}
+    image: yuxi-sandbox-provisioner:${YUXI_VERSION:-0.6.2.dev1}
     container_name: sandbox-provisioner
     volumes:
       - ./saves:/app/saves
@@ -180,7 +181,7 @@ services:
       context: .
       dockerfile: docker/web.Dockerfile
       target: development
-    image: yuxi-web:${YUXI_VERSION:-0.6.2}
+    image: yuxi-web:${YUXI_VERSION:-0.6.2.dev1}
     container_name: web-dev
     volumes:
       - ./web/src:/app/src

@@ -8,6 +8,7 @@ import {
   ClipboardList,
   Blocks,
   Box,
+  FolderKanban,
   PanelLeftClose,
   PanelLeftOpen,
   MessageCirclePlus
@@ -16,6 +17,7 @@ import {
 import { useConfigStore } from '@/stores/config'
 import { useAgentStore } from '@/stores/agent'
 import { useChatThreadsStore } from '@/stores/chatThreads'
+import { useChatUIStore } from '@/stores/chatUI'
 import { useDatabaseStore } from '@/stores/database'
 import { useInfoStore } from '@/stores/info'
 import { useTaskerStore } from '@/stores/tasker'
@@ -30,6 +32,7 @@ import ConversationNavSection from '@/components/ConversationNavSection.vue'
 const configStore = useConfigStore()
 const agentStore = useAgentStore()
 const chatThreadsStore = useChatThreadsStore()
+const chatUIStore = useChatUIStore()
 const databaseStore = useDatabaseStore()
 const infoStore = useInfoStore()
 const taskerStore = useTaskerStore()
@@ -53,7 +56,7 @@ const showDebugModal = ref(false)
 // Add state for settings modal
 const showSettingsModal = ref(false)
 
-const sidebarCollapsed = ref(false)
+const { sidebarCollapsed } = storeToRefs(chatUIStore)
 
 // Provide settings modal methods to child components
 const openSettingsModal = () => {
@@ -130,6 +133,13 @@ const mainList = computed(() => {
       action: true
     }
   ]
+
+  items.push({
+    name: '工作区',
+    path: '/workspace',
+    icon: FolderKanban,
+    activeIcon: FolderKanban
+  })
 
   if (userStore.isAdmin) {
     if (!isLiteMode) {
@@ -577,7 +587,7 @@ div.header,
 
     &.active {
       border-color: transparent;
-      background-color: var(--main-30);
+      background-color: color-mix(in srgb, var(--main-color) 6%, var(--gray-0));
       font-weight: 600;
       color: var(--main-color);
     }
