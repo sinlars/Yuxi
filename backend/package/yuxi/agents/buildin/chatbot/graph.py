@@ -68,10 +68,10 @@ class ChatbotAgent(BaseAgent):
     capabilities = ["file_upload", "files"]  # 支持文件上传功能
     metadata = {
         "examples": [
-            "你好，请介绍一下你自己",
-            "帮我写一封商务邮件",
-            "解释一下什么是机器学习",
-            "创建一个冒泡排序 python 并保存结果",
+            "老年痴呆的定义",
+            "老年期痴呆的分类",
+            "阿尔茨海默病",
+            "老年期痴呆的病因",
         ]
     }
 
