@@ -185,6 +185,12 @@ const router = createRouter({
       meta: { requiresAuth: false }
     },
     {
+      path: '/simple-chat',
+      name: 'SimpleChatbot',
+      component: () => import('../views/SimpleChatView.vue'),
+      meta: { requiresAuth: false }
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'NotFound',
       component: () => import('../views/EmptyView.vue'),
