@@ -35,6 +35,8 @@ services:
     image: yuxi-api:${YUXI_VERSION:-0.6.2.dev1}
     container_name: api-prod
     working_dir: /app
+    ports:
+      - "5050:5050"
     networks:
       - app-network
     volumes:
@@ -148,7 +150,7 @@ services:
     image: yuxi-web:${YUXI_VERSION:-0.6.2.dev1}
     container_name: web-prod
     ports:
-      - "80:80"
+      - "5173:5173"
     depends_on:
       - api
     networks:
