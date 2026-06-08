@@ -392,7 +392,8 @@ const currentAgent = computed(() => {
   if (!currentAgentId.value || !agents.value || !agents.value.length) return null
   return agents.value.find((a) => a.id === currentAgentId.value) || null
 })
-const startAgents = computed(() => agents.value || [])
+//const startAgents = computed(() => agents.value || []) 
+const startAgents = computed(() => currentAgent.value || []) // 只取默认智能体或空数组
 const currentChatId = computed(() => currentThreadId.value)
 
 const currentThreadAgentName = computed(() => {

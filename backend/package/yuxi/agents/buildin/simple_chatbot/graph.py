@@ -61,7 +61,7 @@ async def _build_middlewares(context):
     return middlewares
 
 class SimpleChatbotAgent(BaseAgent):
-    name = "中科医云·智能医学助手"
+    name = "中科医云·AI智能医学助手"
     description = "基础的对话机器人，可以回答问题，可在配置中启用需要的工具。"
     capabilities = []  #["file_upload", "files"]  # 快速问答，暂不支持文件上传功能
     metadata = {

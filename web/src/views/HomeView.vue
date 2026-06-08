@@ -45,7 +45,7 @@
 
         <div class="hero-layout">
           <div class="hero-content reveal-up">
-            <p v-if="typedBadge" class="hero-badge" :class="{ typing: isBadgeTyping }">
+            <!-- <p v-if="typedBadge" class="hero-badge" :class="{ typing: isBadgeTyping }">
               <template v-if="badgeParts.number">
                 <span>{{ badgeParts.prefix }}</span>
                 <a
@@ -59,7 +59,7 @@
                 <span>{{ badgeParts.suffix }}</span>
               </template>
               <template v-else>{{ typedBadge }}</template>
-            </p>
+            </p> -->
             <h1 class="title reveal-up delay-1">{{ infoStore.branding.title }}</h1>
             <Transition name="subtitle-switch" mode="out-in">
               <p v-if="currentSubtitle" class="subtitle" :key="currentSubtitle">
@@ -117,7 +117,7 @@
 
       <footer class="footer">
         <div class="footer-content">
-          <p class="copyright">{{ infoStore.footer?.copyright || '© 2025 All rights reserved' }}</p>
+          <p class="copyright">&copy; {{ new Date().getFullYear() }} {{ infoStore.footer?.copyright || '中科数字出版传媒有限公司 版权所有 京ICP备17034810号-5 京公网安备 11010102002940号' }}</p>
         </div>
       </footer>
     </template>
@@ -141,7 +141,10 @@ import {
   Star,
   CheckCircle2,
   GitCommit,
-  ShieldCheck
+  ShieldCheck,
+  BookOpenText,
+  ClipboardPenLine,
+  House,
 } from 'lucide-vue-next'
 
 const router = useRouter()
@@ -407,7 +410,10 @@ const featureIconMap = {
   resolved: CheckCircle2,
   commits: GitCommit,
   license: ShieldCheck,
-  default: Star
+  default: Star,
+  video: Video,
+  book: BookOpenText,
+  case:ClipboardPenLine,
 }
 
 const actionIconMap = {
@@ -421,7 +427,9 @@ const actionIconMap = {
   demo: Video,
   video: Video,
   github: Github,
-  default: Github
+  default: Github,
+  house: House,
+  case: ClipboardPenLine,
 }
 // endregion icon_mapping
 
@@ -575,7 +583,7 @@ const actionLinks = computed(() => {
   color: var(--main-800);
 
   .logo-img {
-    height: 2rem;
+    height: 3rem;
     margin-right: 0.6rem;
   }
 }

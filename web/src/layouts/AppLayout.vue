@@ -269,7 +269,7 @@ provide('settingsModal', {
     <div class="header" :class="{ 'top-bar': layoutSettings.useTopBar }">
       <div class="sidebar-brand" @click.stop>
         <router-link v-if="!sidebarCollapsed" to="/" class="brand-link">
-          <img :src="infoStore.organization.avatar" class="brand-avatar" />
+          <!-- <img :src="infoStore.organization.avatar" class="brand-avatar" /> -->
           <span class="brand-name">{{ organizationName }}</span>
         </router-link>
         <button
@@ -501,7 +501,7 @@ div.header,
 
   .brand-name {
     min-width: 0;
-    margin-left: 10px;
+    //margin-left: 10px;
     overflow: hidden;
     color: var(--gray-1000);
     font-size: 15px;

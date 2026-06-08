@@ -22,7 +22,7 @@
           <h1 class="brand-text">
             <span v-if="brandOrgName" class="brand-org">{{ brandOrgName }}</span>
             <span v-if="brandOrgName && brandName !== brandOrgName" class="brand-separator"></span>
-            <span class="brand-main">{{ brandName }}</span>
+            <!-- <span class="brand-main">{{ brandName }}</span> -->
           </h1>
         </div>
       </div>
@@ -262,7 +262,7 @@
         <a href="https://medline.cspmmed.com" target="_blank">使用帮助</a>
       </div>
       <div class="copyright">
-        &copy; {{ new Date().getFullYear() }} {{ brandName }}. All Rights Reserved.
+        &copy; {{ new Date().getFullYear() }} {{ infoStore.footer?.copyright || '中科数字出版传媒有限公司 版权所有 京ICP备17034810号-5 京公网安备 11010102002940号' }}
       </div>
     </footer>
   </div>
@@ -710,7 +710,8 @@ onUnmounted(() => {
 }
 
 .brand-logo {
-  height: 32px;
+  //height: 32px;
+  height: 50px;
   width: auto;
   object-fit: contain;
 }
