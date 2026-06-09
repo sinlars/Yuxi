@@ -372,7 +372,11 @@ class OIDCUtils:
         if not username:
             username = userinfo.get("preferred_username", "")
         if not username:
-            username = userinfo.get("email", "").split("@")[0]
+            email = userinfo.get("email", "")
+            if email:
+                username = email.split("@")[0]
+        if not username:
+            username = userinfo.get("phone_number", "")
         if not username:
             username = sub[:20]
 
@@ -784,6 +788,7 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
     if not userinfo:
         return _redirect_to_login_with_error("无法获取用户信息，请返回登录页重试")
 
+    logger.info(f"OIDC user info: {userinfo}")
     extracted_info = OIDCUtils.extract_user_info(userinfo)
     sub = extracted_info["sub"]
 

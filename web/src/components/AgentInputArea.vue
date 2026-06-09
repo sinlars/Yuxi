@@ -85,7 +85,7 @@
         </a-popover>
       </div>
     </template>
-    <template #actions-right>
+    <template #actions-right v-if="userStore.isAdmin">
       <div class="input-actions-right">
         <button
           v-if="hasActiveThread"
@@ -109,6 +109,8 @@ import MessageInputComponent from '@/components/MessageInputComponent.vue'
 import ImagePreviewComponent from '@/components/ImagePreviewComponent.vue'
 import AttachmentOptionsComponent from '@/components/AttachmentOptionsComponent.vue'
 import { FolderKanban, SquareCheck } from 'lucide-vue-next'
+import { useUserStore } from '@/stores/user'
+const userStore = useUserStore()
 import {
   CheckCircleOutlined,
   ClockCircleOutlined,
