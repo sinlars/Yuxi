@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import threading
 from types import MethodType, SimpleNamespace
 
@@ -149,6 +150,79 @@ def test_filesystem_middleware_evicts_large_non_read_file_tool_result() -> None:
     assert isinstance(result, ToolMessage)
     assert len(result.content) < len(content)
     assert f"{VIRTUAL_PATH_LARGE_TOOL_RESULTS}/call-grep" in result.content
+
+
+def test_filesystem_middleware_persists_compact_manifest_for_evicted_kb_result() -> None:
+    class _Backend:
+        artifacts_root = "/"
+
+        def __init__(self):
+            self.writes: list[tuple[str, str]] = []
+
+        def write(self, path: str, content: str):
+            self.writes.append((path, content))
+            return SimpleNamespace(error=None)
+
+    payload = {
+        "kb_id": "kb-1",
+        "results": [
+            {
+                "id": "chunk-1",
+                "kb_id": "kb-1",
+                "file_id": "file-1",
+                "citation_source": "kb://kb-1/file-1?chunk=chunk-1",
+                "content": "教材原文" * 2000 + "\n\n![历史图片](https://example.com/history.jpg)",
+                "metadata": {"source": "教材.pdf", "score": 0.82, "unused": "x" * 1000},
+            }
+        ],
+    }
+    content = json.dumps(payload, ensure_ascii=False)
+    backend = _Backend()
+    middleware = create_agent_filesystem_middleware(tool_token_limit_before_evict=1)
+    middleware.backend = backend
+    request = SimpleNamespace(tool_call={"name": "query_kb"}, runtime=SimpleNamespace())
+
+    result = middleware.wrap_tool_call(
+        request,
+        lambda _: ToolMessage(content=content, name="query_kb", tool_call_id="call-query"),
+    )
+
+    assert backend.writes == [(f"{VIRTUAL_PATH_LARGE_TOOL_RESULTS}/call-query", content)]
+    assert "<yuxi-citation-manifest-v1>" in result.content
+    manifest_json = result.content.split("<yuxi-citation-manifest-v1>", 1)[1].split(
+        "</yuxi-citation-manifest-v1>", 1
+    )[0]
+    manifest = json.loads(manifest_json)
+    assert manifest["knowledge_chunks"][0]["citation_source"] == "kb://kb-1/file-1?chunk=chunk-1"
+    assert manifest["knowledge_chunks"][0]["metadata"] == {"source": "教材.pdf", "score": 0.82}
+    assert manifest["knowledge_chunks"][0]["content"].startswith("教材原文")
+    assert "![历史图片](https://example.com/history.jpg)" in manifest["knowledge_chunks"][0]["content"]
+
+
+def test_filesystem_middleware_adds_citation_source_to_inline_tavily_results() -> None:
+    payload = {
+        "results": [
+            {
+                "title": "权威网页",
+                "url": "https://example.com/source",
+                "content": "网页摘要",
+            }
+        ]
+    }
+    middleware = create_agent_filesystem_middleware(tool_token_limit_before_evict=None)
+    request = SimpleNamespace(tool_call={"name": "tavily_search"}, runtime=SimpleNamespace())
+
+    result = middleware.wrap_tool_call(
+        request,
+        lambda _: ToolMessage(
+            content=json.dumps(payload, ensure_ascii=False),
+            name="tavily_search",
+            tool_call_id="call-search",
+        ),
+    )
+
+    normalized = json.loads(result.content)
+    assert normalized["results"][0]["citation_source"] == "https://example.com/source"
 
 
 def test_filesystem_middleware_keeps_read_file_result_inline_to_avoid_evict_loop() -> None:
@@ -316,6 +390,35 @@ def test_provider_get_create_if_missing_ensures_expected_split_scope(monkeypatch
             "child-skills-thread",
         )
     ]
+
+
+def test_provider_destroy_deletes_scoped_sandbox_and_clears_cache() -> None:
+    from yuxi.agents.backends.sandbox.provider import ProvisionerSandboxProvider, _sandbox_key
+
+    deleted = []
+
+    class FakeClient:
+        def delete(self, sandbox_id):
+            deleted.append(sandbox_id)
+
+    provider = ProvisionerSandboxProvider.__new__(ProvisionerSandboxProvider)
+    provider._client = FakeClient()
+    provider._lock = threading.Lock()
+    provider._thread_locks = {}
+    cache_key = _sandbox_key("user-1", "parent-thread", "child-thread")
+    provider._connections = {cache_key: object()}
+    provider._last_touch_at = {cache_key: 1.0}
+
+    provider.destroy(
+        "child-thread",
+        uid="user-1",
+        file_thread_id="parent-thread",
+        skills_thread_id="child-thread",
+    )
+
+    assert deleted == [sandbox_id_for_thread("parent-thread", "child-thread", uid="user-1")]
+    assert cache_key not in provider._connections
+    assert cache_key not in provider._last_touch_at
 
 
 def test_provisioner_uses_file_and_skills_thread_ids(monkeypatch) -> None:

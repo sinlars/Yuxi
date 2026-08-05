@@ -36,8 +36,8 @@ def test_graph_ppr_ranks_chunk_nodes_from_seed_entities():
 def test_rrf_fusion_merges_chunk_and_graph_rankings():
     kb = object.__new__(MilvusKB)
     base_chunks = [
-        {"content": "base a", "metadata": {"chunk_id": "a"}, "score": 0.9},
-        {"content": "base b", "metadata": {"chunk_id": "b"}, "score": 0.8},
+        {"content": "base a", "metadata": {"chunk_id": "a"}, "score": 0.9, "retrieval_score": 0.9},
+        {"content": "base b", "metadata": {"chunk_id": "b"}, "score": 0.8, "retrieval_score": 0.8},
     ]
     graph_chunks = [
         {"content": "graph b", "metadata": {"chunk_id": "b"}, "score": 0.7, "graph_score": 0.7},
@@ -49,3 +49,6 @@ def test_rrf_fusion_merges_chunk_and_graph_rankings():
     assert [chunk["metadata"]["chunk_id"] for chunk in fused] == ["b", "a", "c"]
     assert fused[0]["graph_score"] == 0.7
     assert fused[0]["fusion_sources"] == ["chunk", "graph"]
+    assert fused[0]["retrieval_score"] == 0.8
+    assert fused[1]["retrieval_score"] == 0.9
+    assert "retrieval_score" not in fused[2]

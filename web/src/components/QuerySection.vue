@@ -72,11 +72,14 @@
                 <div v-for="(chunk, index) in queryResult" :key="index" class="result-item">
                   <div class="result-header">
                     <span class="result-index">#{{ index + 1 }}</span>
-                    <span v-if="chunk.score" class="result-score">
-                      相似度: {{ (chunk.score * 100).toFixed(2) }}%
+                    <span v-if="getPrimaryScore(chunk) !== null" class="result-score">
+                      {{ primaryScoreLabel }}: {{ formatPrimaryScore(chunk) }}
                     </span>
-                    <span v-if="chunk.rerank_score" class="result-rerank-score">
-                      重排序分数: {{ (chunk.rerank_score * 100).toFixed(2) }}%
+                    <span v-else-if="isGraphOnlyResult(chunk)" class="result-origin">
+                      图检索召回
+                    </span>
+                    <span v-if="typeof chunk.rerank_score === 'number'" class="result-rerank-score">
+                      重排分: {{ chunk.rerank_score.toFixed(3) }}
                     </span>
                   </div>
 
@@ -94,8 +97,8 @@
                     <span v-if="chunk.metadata?.chunk_index !== undefined" class="metadata-item">
                       <strong>块索引:</strong> {{ chunk.metadata.chunk_index }}
                     </span>
-                    <span v-if="chunk.distance !== undefined" class="metadata-item">
-                      <strong>距离:</strong> {{ chunk.distance.toFixed(4) }}
+                    <span v-if="typeof chunk.fusion_score === 'number'" class="metadata-item">
+                      <strong>图融合排序分:</strong> {{ chunk.fusion_score.toFixed(4) }}
                     </span>
                   </div>
                 </div>
@@ -179,6 +182,44 @@ const searchLoading = computed(() => store.state.searchLoading)
 const queryResult = ref('')
 const showRawData = ref(false)
 const showQuerySuggestions = computed(() => !searchLoading.value && !queryResult.value)
+const searchMode = computed(() => store.meta.search_mode || 'vector')
+const primaryScoreLabel = computed(() => {
+  if (searchMode.value === 'keyword') return 'BM25 相关性分'
+  if (searchMode.value === 'hybrid') return '混合检索分'
+  return '向量相似度'
+})
+
+const getPrimaryScore = (chunk) => {
+  if (!chunk || typeof chunk !== 'object') return null
+
+  const modeScore =
+    searchMode.value === 'keyword'
+      ? chunk.bm25_score
+      : searchMode.value === 'hybrid'
+        ? chunk.hybrid_score
+        : chunk.retrieval_score
+  if (typeof modeScore === 'number') return modeScore
+  if (typeof chunk.retrieval_score === 'number') return chunk.retrieval_score
+
+  // 兼容尚未返回 retrieval_score 的旧结果；图融合后 distance 才是融合前的检索分。
+  if (typeof chunk.fusion_score === 'number' && typeof chunk.distance === 'number') {
+    return chunk.distance
+  }
+  if (typeof chunk.fusion_score === 'number') return null
+  return typeof chunk.score === 'number' ? chunk.score : null
+}
+
+const formatPrimaryScore = (chunk) => {
+  const score = getPrimaryScore(chunk)
+  if (score === null) return '-'
+  return searchMode.value === 'vector' ? `${(score * 100).toFixed(2)}%` : score.toFixed(3)
+}
+
+// 图检索可补充基础检索未命中的片段，这类结果没有对应的向量/BM25/混合检索分。
+const isGraphOnlyResult = (chunk) =>
+  Array.isArray(chunk?.fusion_sources) &&
+  chunk.fusion_sources.includes('graph') &&
+  !chunk.fusion_sources.includes('chunk')
 
 // 查询测试
 const queryText = ref('')
@@ -561,12 +602,18 @@ defineExpose({
         }
 
         .result-score,
+        .result-origin,
         .result-rerank-score {
           font-size: 12px;
           padding: 2px 8px;
           border-radius: 12px;
           background-color: var(--gray-100);
           color: var(--gray-700);
+        }
+
+        .result-origin {
+          background-color: var(--main-10);
+          color: var(--main-color);
         }
 
         .result-rerank-score {

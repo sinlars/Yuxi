@@ -561,6 +561,7 @@ async def test_keyword_mode_uses_milvus_bm25_search():
 
     assert chunks[0]["content"] == "BM25 result"
     assert chunks[0]["bm25_score"] == 0.8
+    assert chunks[0]["retrieval_score"] == 0.8
     search_call = collection.search_calls[0]
     assert search_call["data"] == ["alpha beta"]
     assert search_call["anns_field"] == CONTENT_SPARSE_FIELD
@@ -599,6 +600,7 @@ async def test_hybrid_mode_uses_milvus_native_hybrid_search():
 
     assert chunks[0]["content"] == "Hybrid result"
     assert chunks[0]["hybrid_score"] == 0.8
+    assert chunks[0]["retrieval_score"] == 0.8
     hybrid_call = collection.hybrid_calls[0]
     assert hybrid_call["limit"] == 3
     assert hybrid_call["rerank"]._weights == [0.6, 0.4]

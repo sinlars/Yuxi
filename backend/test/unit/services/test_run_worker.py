@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -32,6 +33,32 @@ class _BytesAsyncIter:
         value = self._values[self._idx]
         self._idx += 1
         return value
+
+
+@pytest.mark.asyncio
+async def test_consume_stream_destroys_active_work_before_cancel() -> None:
+    stream_cancelled = asyncio.Event()
+    sandbox_destroyed = asyncio.Event()
+
+    async def blocked_stream():
+        try:
+            await asyncio.Event().wait()
+            yield b""
+        finally:
+            stream_cancelled.set()
+
+    async def destroy_sandbox():
+        sandbox_destroyed.set()
+
+    run_ctx = run_worker.RunContext(run_id="run-1", cancel_callback=destroy_sandbox)
+    run_ctx.cancel_event.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in run_worker._consume_stream_with_cancel(blocked_stream(), run_ctx):
+            pass
+
+    assert sandbox_destroyed.is_set()
+    assert stream_cancelled.is_set()
 
 
 def _build_run() -> SimpleNamespace:

@@ -532,6 +532,11 @@ async def index_graph_build(
             await context.set_progress(5.0, "准备构建图谱")
             result = await service.build_pending_chunks(kb_id, batch_size=batch_size, context=context)
             await context.set_result(result)
+            if result["remaining"]:
+                raise RuntimeError(
+                    f"图谱构建未全部完成：成功 {result['success']} 个，失败 {result['failed']} 个，"
+                    f"剩余 {result['remaining']} 个，可重新提交任务继续处理"
+                )
             await context.set_progress(100.0, f"图谱构建完成，成功 {result['success']} 个，失败 {result['failed']} 个")
             return result
 

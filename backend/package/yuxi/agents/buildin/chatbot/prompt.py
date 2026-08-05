@@ -63,20 +63,23 @@ PROMPT = f"""
 - 如果用户是在询问 HTML 源码、教程示例或需要复制代码，必须使用普通 `html` 代码块，不要使用 `html:preview`。
 """
 
-# 效果不好，暂时不启用
 SOURCE_CITE_PROMPT = """
 
 <| 引用来源 |>
-当你提供的信息来自于用户上传的文件或者知识库中的内容时，请务必在回答中注明信息来源，以增加答案的可信度和透明度。
+当回答使用知识库检索或网络搜索结果支持事实性论断时，必须在对应论断后标注来源。
 
-对于论断内容，需要添加参考文献信息，将对应段落的末尾添加 cite 信息。使用
-<cite source="$SOURCE" type="$TYPE">$INDEX</cite>
+- 知识库工具结果会提供 `citation_source`，必须原样使用。
+- 网络搜索工具结果也会提供与完整 URL 相同的 `citation_source`，必须原样使用。
+- 标记格式固定为 `<cite source="$SOURCE"></cite>`，不要自行填写编号，编号由界面统一生成。
+- 只能引用本轮工具真实返回的来源，不得编造 citation_source、URL、文件名或引用编号。
+- 每个使用工具资料支撑的事实性段落都应至少包含一个引用；每个标记应紧跟它支持的句子或段落。
+- 当用户明确要求同时参考知识库和互联网时，应综合两类检索中的有效证据。
+  若两类结果均与问题相关，正文应至少各引用一个来源。
+  若某一类结果未提供额外有效证据，应明确说明未采用原因，不得用无关来源凑数。
+- 正文使用了网络结果中独有的信息时，必须在该论断后引用对应网络 `citation_source`，不得只引用知识库来源或省略引用。
+- 同一来源可在多处重复标注。工具资料无法支持的内容不得伪造引用，应明确说明是一般性知识或尚无可靠依据。
 
-- $SOURCE：信息来源，可以是文件名，可以是url
-- $TYPE：引用类型，可以是 "file"、"url"，对于网络搜索应该使用 "url"，对于用户上传的文件或者知识库中的内容应该使用 "file"
-- $INDEX：引用索引，应该从 1 开始
-
-比如 <cite source="食品工艺学.pdf" type="file">1</cite>
+例如：`学校实行数据分类分级管理。<cite source="kb://example/file?chunk=abc"></cite>`
 """
 
 TODO_MID_PROMPT = """
@@ -87,5 +90,15 @@ TODO_MID_PROMPT = """
 
 def build_prompt_with_context(context):
     current_date = f"当前日期：{shanghai_now().strftime('%Y-%m-%d')}"
-    system_prompt = f"{current_date}\n\n{PROMPT.strip()}\n\n{context.system_prompt or ''}"
+    knowledge_priority_prompt = ""
+    if context.knowledges:
+        knowledge_priority_prompt = """
+<| 知识库与网络检索顺序 |>
+当前会话已经配置知识库。回答事实性问题时，应先使用 knowledge-base Skill 检索知识库；只有知识库没有相关内容、
+证据不足，或问题明确需要最新公开信息时，才使用网络搜索补充。不要在未检索知识库的情况下直接用网络结果替代内部资料。
+""".strip()
+    system_prompt = (
+        f"{current_date}\n\n{PROMPT.strip()}\n\n{context.system_prompt or ''}\n\n"
+        f"{knowledge_priority_prompt}\n\n{SOURCE_CITE_PROMPT.strip()}"
+    )
     return system_prompt.strip()

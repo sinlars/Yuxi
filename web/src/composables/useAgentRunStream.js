@@ -180,6 +180,7 @@ export function useAgentRunStream({
       status === RUN_INTERRUPTED_STATUS && hasPendingInterruptInThreads(touchedThreadIds, runId)
     touchedThreadIds.forEach((id) => streamSmoother?.flushThread(id))
     ts.isStreaming = false
+    ts.latestRunStatus = status || null
     if (isInterrupted) {
       ts.activeRunId = runId
       saveActiveRunSnapshot(threadId, runId, ts.runLastSeq)
@@ -246,6 +247,7 @@ export function useAgentRunStream({
     const runController = new AbortController()
     ts.runStreamAbortController = runController
     ts.activeRunId = runId
+    ts.latestRunStatus = null
     ts.runLastSeq = normalizeRunSeq(afterSeq)
     ts.lastRetryableJobTry = null
     ts.isStreaming = true

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 
 from deepagents.backends.composite import (
@@ -10,6 +12,7 @@ from deepagents.backends.composite import (
 )
 from deepagents.backends.protocol import FileInfo, GlobResult
 from deepagents.middleware.filesystem import FilesystemMiddleware
+from langchain_core.messages import ToolMessage
 
 from yuxi.agents.skills.service import normalize_string_list
 from yuxi.utils.paths import VIRTUAL_PATH_CONVERSATION_HISTORY, VIRTUAL_PATH_LARGE_TOOL_RESULTS, VIRTUAL_PATH_OUTPUTS
@@ -18,6 +21,153 @@ from .sandbox import ProvisionerSandboxBackend
 from .skills_backend import SelectedSkillsReadonlyBackend
 
 _TOOL_RESULT_EVICTION_EXEMPT_TOOLS = frozenset({"read_file", "open_kb_document"})
+_CITATION_MANIFEST_START = "<yuxi-citation-manifest-v1>"
+_CITATION_MANIFEST_END = "</yuxi-citation-manifest-v1>"
+_CITATION_EXCERPT_CHARS = 3000
+_CITATION_IMAGE_LIMIT = 4
+
+
+def _parse_tool_message_content(message: ToolMessage):
+    content = message.content
+    if isinstance(content, (dict, list)):
+        return content
+    if not isinstance(content, str):
+        return None
+    try:
+        return json.loads(content)
+    except (TypeError, ValueError):
+        return None
+
+
+def _attach_inline_citation_sources(tool_name: str, message: ToolMessage) -> ToolMessage:
+    """Expose stable source ids directly in normal-sized web search results."""
+    if "tavily_search" not in str(tool_name or "").lower():
+        return message
+
+    payload = _parse_tool_message_content(message)
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        return message
+
+    changed = False
+    results = []
+    for item in payload["results"]:
+        if not isinstance(item, dict):
+            results.append(item)
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url or item.get("citation_source") == url:
+            results.append(item)
+            continue
+        results.append({**item, "citation_source": url})
+        changed = True
+
+    if not changed:
+        return message
+    normalized_payload = {**payload, "results": results}
+    content = (
+        json.dumps(normalized_payload, ensure_ascii=False)
+        if isinstance(message.content, str)
+        else normalized_payload
+    )
+    return message.model_copy(update={"content": content})
+
+
+def _compact_citation_item(item: dict, *, kb_id: str = "", file_id: str = "") -> dict | None:
+    citation_source = str(item.get("citation_source") or "").strip()
+    content = str(item.get("content") or "").strip()
+    if not citation_source or not content:
+        return None
+
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    compact_metadata = {
+        key: metadata[key]
+        for key in (
+            "source",
+            "file_name",
+            "filename",
+            "file_id",
+            "chunk_id",
+            "chunk_index",
+            "score",
+            "start_line",
+            "end_line",
+        )
+        if metadata.get(key) is not None
+    }
+    excerpt = content[:_CITATION_EXCERPT_CHARS]
+    # 图片可能位于长片段尾部；单独保留少量 Markdown 图片，供引用气泡恢复图文来源。
+    for image_markdown in re.findall(r"!\[[^\]]*\]\([^\n)]+\)", content)[:_CITATION_IMAGE_LIMIT]:
+        if image_markdown not in excerpt:
+            excerpt = f"{excerpt}\n\n{image_markdown}"
+
+    compact = {
+        "id": str(item.get("id") or metadata.get("chunk_id") or ""),
+        "kb_id": str(item.get("kb_id") or kb_id or ""),
+        "file_id": str(item.get("file_id") or metadata.get("file_id") or file_id or ""),
+        "citation_source": citation_source,
+        "content": excerpt,
+        "metadata": compact_metadata,
+    }
+    if isinstance(item.get("score"), (int, float)):
+        compact["score"] = item["score"]
+    for key in ("start_line", "end_line"):
+        if isinstance(item.get(key), int):
+            compact[key] = item[key]
+    return compact
+
+
+def _build_citation_manifest(tool_name: str, message: ToolMessage) -> dict | None:
+    payload = _parse_tool_message_content(message)
+    if not isinstance(payload, dict):
+        return None
+
+    normalized_name = str(tool_name or "").lower()
+    if normalized_name in {"query_kb", "find_kb_document", "open_kb_document"}:
+        kb_id = str(payload.get("kb_id") or "")
+        file_id = str(payload.get("file_id") or "")
+        if isinstance(payload.get("results"), list):
+            raw_items = payload["results"]
+        elif isinstance(payload.get("windows"), list):
+            raw_items = payload["windows"]
+        else:
+            raw_items = [payload]
+        chunks = [
+            compact
+            for item in raw_items
+            if isinstance(item, dict)
+            and (compact := _compact_citation_item(item, kb_id=kb_id, file_id=file_id)) is not None
+        ]
+        return {"version": 1, "knowledge_chunks": chunks} if chunks else None
+
+    if "tavily_search" in normalized_name and isinstance(payload.get("results"), list):
+        sources = []
+        for item in payload["results"]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            url = str(item.get("url") or "").strip()
+            if not title or not url:
+                continue
+            source = {
+                "title": title,
+                "url": url,
+                "citation_source": url,
+                "content": str(item.get("content") or "")[:_CITATION_EXCERPT_CHARS],
+            }
+            for key in ("score", "published_date"):
+                if item.get(key) is not None:
+                    source[key] = item[key]
+            sources.append(source)
+        return {"version": 1, "web_sources": sources} if sources else None
+    return None
+
+
+def _attach_citation_manifest(message: ToolMessage, manifest: dict | None) -> ToolMessage:
+    if not manifest or not isinstance(message.content, str):
+        return message
+    encoded = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
+    content = f"{message.content}\n\n{_CITATION_MANIFEST_START}{encoded}{_CITATION_MANIFEST_END}"
+    return message.model_copy(update={"content": content})
 
 
 def _coerce_glob_result(result) -> GlobResult:
@@ -93,23 +243,41 @@ class YuxiFilesystemMiddleware(FilesystemMiddleware):
 
     def wrap_tool_call(self, request, handler):
         tool_result = handler(request)
+        normalized_result = (
+            _attach_inline_citation_sources(request.tool_call["name"], tool_result)
+            if isinstance(tool_result, ToolMessage)
+            else tool_result
+        )
 
         if self._tool_token_limit_before_evict is None:
-            return tool_result
+            return normalized_result
         if request.tool_call["name"] in _TOOL_RESULT_EVICTION_EXEMPT_TOOLS:
-            return tool_result
+            return normalized_result
 
-        return self._intercept_large_tool_result(tool_result, request.runtime)
+        processed_result = self._intercept_large_tool_result(normalized_result, request.runtime)
+        if isinstance(normalized_result, ToolMessage) and processed_result is not normalized_result:
+            manifest = _build_citation_manifest(request.tool_call["name"], normalized_result)
+            return _attach_citation_manifest(processed_result, manifest)
+        return processed_result
 
     async def awrap_tool_call(self, request, handler):
         tool_result = await handler(request)
+        normalized_result = (
+            _attach_inline_citation_sources(request.tool_call["name"], tool_result)
+            if isinstance(tool_result, ToolMessage)
+            else tool_result
+        )
 
         if self._tool_token_limit_before_evict is None:
-            return tool_result
+            return normalized_result
         if request.tool_call["name"] in _TOOL_RESULT_EVICTION_EXEMPT_TOOLS:
-            return tool_result
+            return normalized_result
 
-        return await self._aintercept_large_tool_result(tool_result, request.runtime)
+        processed_result = await self._aintercept_large_tool_result(normalized_result, request.runtime)
+        if isinstance(normalized_result, ToolMessage) and processed_result is not normalized_result:
+            manifest = _build_citation_manifest(request.tool_call["name"], normalized_result)
+            return _attach_citation_manifest(processed_result, manifest)
+        return processed_result
 
 
 @dataclass(frozen=True)

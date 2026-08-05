@@ -94,3 +94,37 @@ async def test_list_by_file_ids_splits_large_inputs(monkeypatch):
 
     assert batch_lengths == [SQL_IN_BATCH_SIZE, 5]
     assert [chunk.file_id for chunk in chunks] == sorted(file_ids)
+
+
+@pytest.mark.asyncio
+async def test_list_graph_pending_excludes_failed_chunk_ids(monkeypatch):
+    captured_exclusions: list[set[str]] = []
+
+    class FakeScalarResult:
+        def all(self):
+            return []
+
+    class FakeResult:
+        def scalars(self):
+            return FakeScalarResult()
+
+    class FakeSession:
+        async def execute(self, statement):
+            values = statement.compile().params.values()
+            captured_exclusions.extend(set(value) for value in values if isinstance(value, list | tuple | set))
+            return FakeResult()
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield FakeSession()
+
+    monkeypatch.setattr(repo_module.pg_manager, "get_async_session_context", fake_session_context)
+
+    chunks = await KnowledgeChunkRepository().list_graph_pending_by_kb_id(
+        "kb-test",
+        20,
+        exclude_chunk_ids={"failed-1", "failed-2"},
+    )
+
+    assert chunks == []
+    assert captured_exclusions == [{"failed-1", "failed-2"}]

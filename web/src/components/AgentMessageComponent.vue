@@ -59,6 +59,7 @@
         :content="parsedData.content"
         code-copy
         class="message-md"
+        @citation-click="handleCitationClick"
       />
 
       <div v-else-if="parsedData.reasoning_content" class="empty-block"></div>
@@ -144,6 +145,49 @@
       <img :src="imagePreview.src" :alt="imagePreview.alt" class="message-image-preview-img" />
     </div>
   </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="citationPreview.visible"
+      class="citation-preview-layer"
+      @click="closeCitationPreview"
+    >
+      <aside
+        class="citation-preview-popover"
+        :class="`is-${citationPreview.placement}`"
+        :style="citationPreview.style"
+        @click.stop
+      >
+        <header class="citation-preview-header">
+          <span class="citation-preview-badge">{{ citationPreview.index }}</span>
+          <div class="citation-preview-heading">
+            <span class="citation-preview-type">{{ citationPreview.typeLabel }}</span>
+            <strong :title="citationPreview.title">{{ citationPreview.title }}</strong>
+          </div>
+          <button class="citation-preview-close" title="关闭" @click="closeCitationPreview">
+            <X :size="16" />
+          </button>
+        </header>
+        <div v-if="citationPreview.meta" class="citation-preview-meta">
+          {{ citationPreview.meta }}
+        </div>
+        <MarkdownPreview
+          class="citation-preview-content"
+          compact
+          :content="citationPreview.content || '暂无引用摘要'"
+        />
+        <a
+          v-if="citationPreview.url"
+          class="citation-preview-link"
+          :href="citationPreview.url"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          访问原文
+        </a>
+      </aside>
+    </div>
+  </Teleport>
 </template>
 
 <script setup>
@@ -160,6 +204,7 @@ import { storeToRefs } from 'pinia'
 import { MessageProcessor } from '@/utils/messageProcessor'
 import { inferImageMimeTypeFromBase64, normalizeAttachmentPreviews } from '@/utils/file_utils'
 import { buildMentionDisplayLabels } from '@/utils/mention_utils'
+import { renderSourceCitations } from '@/utils/sourceCitations'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
 
@@ -183,6 +228,10 @@ const props = defineProps({
   showRefs: {
     type: [Array, Boolean],
     default: () => false
+  },
+  sources: {
+    type: Object,
+    default: null
   },
   // 是否为最新消息
   isLatestMessage: {
@@ -228,6 +277,7 @@ const closeImagePreview = () => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleImagePreviewKeydown)
+  window.removeEventListener('keydown', handleCitationPreviewKeydown)
 })
 
 // 复制状态
@@ -309,6 +359,7 @@ const messageImageMimeType = computed(
 const mentionDisplayLabels = computed(() => buildMentionDisplayLabels(props.mention || {}))
 
 const messageSources = computed(() => {
+  if (props.sources) return props.sources
   if (props.message.type === 'ai') {
     return MessageProcessor.extractSourcesFromMessage(props.message, availableKnowledgeBases.value)
   }
@@ -320,10 +371,70 @@ const validToolCalls = computed(() => enrichTaskToolCalls(props.message.tool_cal
 const parsedData = computed(() => {
   const { content, reasoningContent } = MessageProcessor.parseAssistantMessageBody(props.message)
   return {
-    content,
+    content: renderSourceCitations(content, messageSources.value),
     reasoning_content: reasoningContent
   }
 })
+
+const citationPreview = ref({ visible: false })
+
+const closeCitationPreview = () => {
+  citationPreview.value = { visible: false }
+  window.removeEventListener('keydown', handleCitationPreviewKeydown)
+}
+
+const handleCitationPreviewKeydown = (event) => {
+  if (event.key === 'Escape') closeCitationPreview()
+}
+
+const getCitationMeta = (source) => {
+  const startLine = Number(source?.metadata?.start_line || 0)
+  const endLine = Number(source?.metadata?.end_line || 0)
+  if (startLine && endLine) {
+    return startLine === endLine ? `第 ${startLine} 行` : `第 ${startLine}-${endLine} 行`
+  }
+  if (typeof source?.score === 'number') return `检索分 ${Number(source.score).toFixed(3)}`
+  return ''
+}
+
+const handleCitationClick = (citationSource, anchorRect) => {
+  if (!citationSource || !anchorRect) return
+
+  const knowledgeSource = messageSources.value.knowledgeChunks.find(
+    (source) => source.citation_source === citationSource
+  )
+  const webSource = messageSources.value.webSources.find(
+    (source) => source.citation_source === citationSource
+  )
+  const source = knowledgeSource || webSource
+  if (!source) return
+
+  const popoverWidth = Math.min(360, window.innerWidth - 24)
+  const rightPosition = anchorRect.right + 10
+  const hasRightSpace = rightPosition + popoverWidth <= window.innerWidth - 12
+  const left = hasRightSpace
+    ? rightPosition
+    : Math.max(12, anchorRect.left - popoverWidth - 10)
+  const top = Math.min(Math.max(12, anchorRect.top - 24), Math.max(12, window.innerHeight - 340))
+
+  citationPreview.value = {
+    visible: true,
+    placement: hasRightSpace ? 'right' : 'left',
+    style: { left: `${left}px`, top: `${top}px`, width: `${popoverWidth}px` },
+    index: source.citation_index,
+    typeLabel: knowledgeSource ? '知识库来源' : '网络来源',
+    title:
+      knowledgeSource?.metadata?.source ||
+      knowledgeSource?.filename ||
+      webSource?.title ||
+      '引用来源',
+    content: source.content || source.snippet || '',
+    meta: knowledgeSource ? getCitationMeta(knowledgeSource) : '',
+    url: webSource?.url || ''
+  }
+  window.removeEventListener('keydown', handleCitationPreviewKeydown)
+  window.addEventListener('keydown', handleCitationPreviewKeydown)
+}
 </script>
 
 <style lang="less" scoped>
@@ -693,6 +804,156 @@ const parsedData = computed(() => {
 
   &:hover {
     background: rgba(255, 255, 255, 0.28);
+  }
+}
+
+.citation-preview-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 2100;
+}
+
+.citation-preview-popover {
+  position: fixed;
+  max-height: min(320px, calc(100vh - 24px));
+  padding: 14px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  background: var(--gray-25);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2);
+  color: var(--gray-900);
+
+  &::before,
+  &::after {
+    position: absolute;
+    top: 29px;
+    width: 0;
+    height: 0;
+    border: 7px solid transparent;
+    content: '';
+    pointer-events: none;
+  }
+
+  &.is-right::before {
+    left: -14px;
+    border-right-color: var(--gray-200);
+  }
+
+  &.is-right::after {
+    left: -12px;
+    border-right-color: var(--gray-25);
+  }
+
+  &.is-left::before {
+    right: -14px;
+    border-left-color: var(--gray-200);
+  }
+
+  &.is-left::after {
+    right: -12px;
+    border-left-color: var(--gray-25);
+  }
+}
+
+.citation-preview-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.citation-preview-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--main-color);
+  color: var(--gray-0);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.citation-preview-heading {
+  min-width: 0;
+  flex: 1;
+
+  strong {
+    display: block;
+    overflow: hidden;
+    color: var(--gray-900);
+    font-size: 13px;
+    line-height: 1.5;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.citation-preview-type,
+.citation-preview-meta {
+  color: var(--gray-500);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.citation-preview-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--gray-500);
+  cursor: pointer;
+
+  &:hover {
+    color: var(--gray-900);
+  }
+}
+
+.citation-preview-meta {
+  margin: 8px 29px 0;
+}
+
+.citation-preview-content {
+  max-height: 200px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--gray-150);
+  overflow-y: auto;
+  color: var(--gray-800);
+  font-size: 13px;
+  line-height: 1.65;
+  word-break: break-word;
+
+  :deep(p) {
+    margin: 0 0 8px;
+  }
+
+  :deep(img) {
+    display: block;
+    width: auto;
+    max-width: 100%;
+    max-height: 150px;
+    margin: 8px auto;
+    object-fit: contain;
+    border-radius: 4px;
+  }
+}
+
+.citation-preview-link {
+  display: inline-block;
+  margin-top: 10px;
+  color: var(--main-color);
+  font-size: 12px;
+  text-decoration: none;
+
+  &:hover {
+    text-decoration: underline;
   }
 }
 </style>

@@ -1,7 +1,7 @@
 <template>
-  <div class="kb-result-grouped-list">
+  <div ref="listRef" class="kb-result-grouped-list">
     <div v-if="showSummary" class="result-summary">
-      找到 {{ normalizedChunks.length }} 个相关文档片段，来自 {{ fileGroupList.length }} 个文件
+      找到 {{ normalizedChunks.length }} 个知识库来源，来自 {{ fileGroupList.length }} 个文件
     </div>
 
     <div class="kb-results" v-if="normalizedChunks.length > 0">
@@ -20,7 +20,7 @@
             <ChevronDown v-else :size="14" class="expand-icon" />
             <FileText :size="14" color="var(--gray-600)" />
             <span class="file-name">{{ fileGroup.filename }}</span>
-            <span class="chunk-count">{{ fileGroup.chunks.length }} chunks</span>
+            <span class="chunk-count">{{ fileGroup.chunks.length }} 项</span>
           </div>
           <button
             v-if="fileGroup.kb_id && fileGroup.file_id"
@@ -37,14 +37,24 @@
             v-for="(chunk, index) in fileGroup.chunks"
             :key="getChunkKey(chunk, index)"
             class="chunk-item"
-            :class="{ 'high-relevance': typeof chunk.score === 'number' && chunk.score > 0.5 }"
-            @click="openChunkDetail(chunk, index + 1)"
+            :class="{
+              'high-relevance': typeof chunk.score === 'number' && chunk.score > 0.5,
+              'is-citation-highlighted': highlightedSource === chunk.citation_source
+            }"
+            :data-citation-source="chunk.citation_source || undefined"
+            @click="openChunkDetail(chunk, chunk.citation_index || index + 1)"
           >
             <div class="chunk-summary">
-              <span class="chunk-index">#{{ index + 1 }}</span>
+              <span v-if="chunk.citation_index" class="citation-badge">
+                {{ chunk.citation_index }}
+              </span>
+              <span v-else class="chunk-index">候选</span>
               <div class="chunk-scores">
+                <span v-if="chunk.source_type === 'document_window'" class="score-item"
+                  >阅读范围</span
+                >
                 <span v-if="typeof chunk.score === 'number'" class="score-item"
-                  >相似度 {{ (chunk.score * 100).toFixed(0) }}%</span
+                  >检索分 {{ formatRetrievalScore(chunk.score) }}</span
                 >
                 <span v-if="typeof chunk.rerank_score === 'number'" class="score-item"
                   >重排序 {{ (chunk.rerank_score * 100).toFixed(0) }}%</span
@@ -66,7 +76,7 @@
     <KbChunkDetailModal
       v-model:open="modalVisible"
       :chunk="selectedChunk"
-      :title-prefix="`文档片段 #${selectedChunkIndex || '-'} `"
+      :title-prefix="detailTitlePrefix"
     />
 
     <FileDetailModal
@@ -78,7 +88,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { FileText, ChevronRight, ChevronDown, Eye } from 'lucide-vue-next'
 import KbChunkDetailModal from './KbChunkDetailModal.vue'
 import FileDetailModal from '@/components/FileDetailModal.vue'
@@ -91,6 +101,10 @@ const props = defineProps({
   showSummary: {
     type: Boolean,
     default: true
+  },
+  defaultExpanded: {
+    type: Boolean,
+    default: false
   },
   emptyText: {
     type: String,
@@ -105,6 +119,9 @@ const selectedChunkIndex = ref(null)
 const fileDetailOpen = ref(false)
 const fileDetailKbId = ref('')
 const fileDetailFileId = ref('')
+const listRef = ref(null)
+const highlightedSource = ref('')
+let highlightTimer = null
 
 const resolveChunks = (input) => {
   if (Array.isArray(input)) return input
@@ -165,8 +182,13 @@ const fileGroupList = computed(() => {
 watch(
   fileGroupList,
   (groups) => {
-    // 分组变化时仅清理失效展开项，默认保持折叠状态。
     const validFilenames = new Set(groups.map((item) => item.filename))
+    if (props.defaultExpanded) {
+      expandedFiles.value = validFilenames
+      return
+    }
+
+    // 工具调用结果默认折叠，仅清理已经失效的手动展开项。
     expandedFiles.value = new Set(
       [...expandedFiles.value].filter((filename) => validFilenames.has(filename))
     )
@@ -192,12 +214,19 @@ const getPreviewText = (text = '') => {
   return content.length <= 100 ? content : `${content.substring(0, 100)}...`
 }
 
+const formatRetrievalScore = (score) => Number(score).toFixed(3)
+
 const getLineRange = (chunk) => {
   const startLine = Number(chunk?.metadata?.start_line || 0)
   const endLine = Number(chunk?.metadata?.end_line || 0)
   if (!startLine || !endLine) return ''
   return startLine === endLine ? `第 ${startLine} 行` : `第 ${startLine}-${endLine} 行`
 }
+
+const detailTitlePrefix = computed(() => {
+  const sourceLabel = selectedChunk.value?.source_type === 'document_window' ? '文档阅读范围' : '文档片段'
+  return `${sourceLabel} #${selectedChunkIndex.value || '-'} `
+})
 
 const openChunkDetail = (chunk, index) => {
   selectedChunk.value = chunk
@@ -210,6 +239,37 @@ const openFileDetail = (fileGroup) => {
   fileDetailFileId.value = fileGroup.file_id || ''
   fileDetailOpen.value = Boolean(fileDetailKbId.value && fileDetailFileId.value)
 }
+
+const revealSource = async (citationSource) => {
+  const source = String(citationSource || '')
+  if (!source) return false
+
+  const fileGroup = fileGroupList.value.find((group) =>
+    group.chunks.some((chunk) => chunk.citation_source === source)
+  )
+  if (!fileGroup) return false
+
+  expandedFiles.value = new Set([...expandedFiles.value, fileGroup.filename])
+  highlightedSource.value = source
+  await nextTick()
+
+  const target = [...(listRef.value?.querySelectorAll('[data-citation-source]') || [])].find(
+    (element) => element.dataset.citationSource === source
+  )
+  target?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+
+  if (highlightTimer) window.clearTimeout(highlightTimer)
+  highlightTimer = window.setTimeout(() => {
+    highlightedSource.value = ''
+  }, 1800)
+  return true
+}
+
+onBeforeUnmount(() => {
+  if (highlightTimer) window.clearTimeout(highlightTimer)
+})
+
+defineExpose({ revealSource })
 </script>
 
 <style scoped lang="less">
@@ -247,6 +307,11 @@ const openFileDetail = (fileGroup) => {
 
       &:hover {
         background: var(--gray-25);
+      }
+
+      &.is-citation-highlighted {
+        background: var(--main-10);
+        box-shadow: inset 3px 0 0 var(--main-color);
       }
 
       &.expanded {
@@ -323,18 +388,35 @@ const openFileDetail = (fileGroup) => {
       }
 
       .chunk-summary {
-        display: flex;
+        display: grid;
+        grid-template-columns: 32px auto minmax(0, 1fr) 14px;
         align-items: center;
         gap: 8px;
 
         .chunk-index {
+          width: 32px;
+          box-sizing: border-box;
           color: var(--gray-700);
           font-size: 11px;
-          min-width: 22px;
           text-align: center;
           background: var(--gray-25);
           border-radius: 4px;
           padding: 1px 4px;
+        }
+
+        .citation-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          justify-self: center;
+          width: 18px;
+          height: 18px;
+          border-radius: 50%;
+          background: var(--main-10);
+          color: var(--main-color);
+          font-size: 11px;
+          font-weight: 600;
+          line-height: 1;
         }
 
         .chunk-scores {

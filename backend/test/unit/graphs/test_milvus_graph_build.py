@@ -10,6 +10,7 @@ from yuxi.knowledge.graphs.extractors import (
     LLMGraphExtractor,
     normalize_extraction_result,
 )
+from yuxi.knowledge.graphs.extractors import llm as llm_extractor_module
 from yuxi.knowledge.graphs.milvus_graph_service import MilvusGraphService
 
 
@@ -110,6 +111,67 @@ def test_llm_graph_extractor_appends_schema_to_fixed_prompt():
     assert "文本：\n张三任职于公司" in prompt
 
 
+@pytest.mark.asyncio
+async def test_llm_graph_extractor_retries_timeout_then_succeeds(monkeypatch):
+    model = SimpleNamespace(
+        call=AsyncMock(
+            side_effect=[
+                Exception("Error calling model: Request timed out."),
+                SimpleNamespace(content='{"relations": []}'),
+            ]
+        )
+    )
+    select_model = MagicMock(return_value=model)
+    sleep = AsyncMock()
+    monkeypatch.setattr(llm_extractor_module, "select_model", select_model)
+    monkeypatch.setattr(llm_extractor_module.asyncio, "sleep", sleep)
+    extractor = LLMGraphExtractor(
+        {
+            "model_spec": "test/model",
+            "request_timeout_seconds": 180,
+            "timeout_retries": 1,
+        }
+    )
+
+    result = await extractor.extract("张三任职于公司", chunk_metadata={"chunk_id": "chunk_1"})
+
+    assert result == {"relations": []}
+    assert model.call.await_count == 2
+    select_model.assert_called_once_with(model_spec="test/model", timeout=180.0, model_params={})
+    sleep.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_llm_graph_extractor_does_not_retry_non_timeout_error(monkeypatch):
+    model = SimpleNamespace(call=AsyncMock(side_effect=ValueError("invalid response")))
+    monkeypatch.setattr(llm_extractor_module, "select_model", MagicMock(return_value=model))
+    sleep = AsyncMock()
+    monkeypatch.setattr(llm_extractor_module.asyncio, "sleep", sleep)
+    extractor = LLMGraphExtractor({"model_spec": "test/model", "timeout_retries": 1})
+
+    with pytest.raises(ValueError, match="invalid response"):
+        await extractor.extract("张三任职于公司")
+
+    assert model.call.await_count == 1
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"request_timeout_seconds": 20}, "30 到 600"),
+        ({"request_timeout_seconds": 601}, "30 到 600"),
+        ({"timeout_retries": -1}, "0 到 3"),
+        ({"timeout_retries": 4}, "0 到 3"),
+    ],
+)
+def test_llm_graph_extractor_validates_timeout_options(options, message):
+    extractor = LLMGraphExtractor({"model_spec": "test/model", **options})
+
+    with pytest.raises(ValueError, match=message):
+        extractor.validate_options()
+
+
 def test_graph_extractor_factory_supports_only_llm():
     assert GraphExtractorFactory.supported_types() == ["llm"]
 
@@ -181,6 +243,79 @@ async def test_milvus_graph_service_configure_persists_updated_concurrency():
     assert status["config"]["extractor_options"]["concurrency_count"] == 9
     assert status["entity_count"] == 3
     assert status["relationship_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_graph_status_ignores_historical_failure_after_all_chunks_are_indexed():
+    kb = SimpleNamespace(kb_type="milvus", additional_params={"graph_build_config": {"locked": True}})
+    kb_repo = SimpleNamespace(get_by_kb_id=AsyncMock(return_value=kb))
+    chunk_repo = SimpleNamespace(
+        count_by_kb_id=AsyncMock(return_value=11_017),
+        count_graph_pending_by_kb_id=AsyncMock(return_value=0),
+        count_graph_indexed_by_kb_id=AsyncMock(return_value=11_017),
+    )
+    graph_repo = SimpleNamespace(count_by_kb_id=AsyncMock(return_value=(5_316, 11_506)))
+    tasker = SimpleNamespace(
+        find_task_by_payload=AsyncMock(
+            side_effect=[None, SimpleNamespace(status="failed", progress=100)]
+        )
+    )
+    service = MilvusGraphService(kb_repo=kb_repo, chunk_repo=chunk_repo, graph_repo=graph_repo)
+
+    status = await service.get_status("kb_test", tasker=tasker)
+
+    assert status["pending_chunks"] == 0
+    assert status["indexed_chunks"] == 11_017
+    assert status["build_task_status"] is None
+
+
+@pytest.mark.asyncio
+async def test_graph_build_continues_after_failed_chunks_fill_a_batch():
+    chunks = [SimpleNamespace(chunk_id=f"chunk_{index}", file_id="file_1") for index in range(3)]
+
+    class ChunkRepo:
+        def __init__(self):
+            self.indexed: set[str] = set()
+
+        async def count_graph_pending_by_kb_id(self, kb_id):
+            return len(chunks) - len(self.indexed)
+
+        async def list_graph_pending_by_kb_id(self, kb_id, limit, exclude_chunk_ids=None):
+            excluded = exclude_chunk_ids or set()
+            return [chunk for chunk in chunks if chunk.chunk_id not in self.indexed | excluded][:limit]
+
+        async def mark_graph_indexed(self, chunk_id, ent_ids=None):
+            self.indexed.add(chunk_id)
+
+    chunk_repo = ChunkRepo()
+    graph_repo = SimpleNamespace(upsert_chunk_graph=AsyncMock())
+    graph_vector_store = SimpleNamespace(insert_missing_graph_records=AsyncMock())
+    service = MilvusGraphService(
+        chunk_repo=chunk_repo,
+        graph_repo=graph_repo,
+        graph_vector_store=graph_vector_store,
+    )
+    service._get_milvus_kb = AsyncMock(
+        return_value=SimpleNamespace(
+            additional_params={
+                "graph_build_config": {
+                    "locked": True,
+                    "extractor_type": "llm",
+                    "extractor_options": {"model_spec": "test/model", "concurrency_count": 1},
+                }
+            },
+            embedding_model_spec="test/embed",
+        )
+    )
+    service._get_chunk_extraction_result = AsyncMock(
+        side_effect=[RuntimeError("timeout"), {"entities": [], "relations": []}, {"entities": [], "relations": []}]
+    )
+    service.write_chunk_graph = MagicMock(return_value=([], []))
+
+    result = await service.build_pending_chunks("kb_test", batch_size=1)
+
+    assert result == {"kb_id": "kb_test", "success": 2, "failed": 1, "remaining": 1}
+    assert chunk_repo.indexed == {"chunk_1", "chunk_2"}
 
 
 def test_milvus_graph_service_writes_chunk_entity_and_relation():

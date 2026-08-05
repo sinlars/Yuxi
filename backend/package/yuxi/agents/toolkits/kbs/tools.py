@@ -2,6 +2,7 @@
 
 import inspect
 from typing import Any
+from urllib.parse import quote
 
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
@@ -198,10 +199,37 @@ def _find_query_target(
     return target_info, normalized_kb_id, None
 
 
+def _kb_citation_source(
+    kb_id: str,
+    file_id: str,
+    *,
+    chunk_id: str = "",
+    start_line: int = 0,
+    end_line: int = 0,
+) -> str:
+    source = f"kb://{quote(str(kb_id), safe='')}/{quote(str(file_id), safe='')}"
+    if chunk_id:
+        return f"{source}?chunk={quote(str(chunk_id), safe='')}"
+    if start_line > 0:
+        return f"{source}?lines={start_line}-{max(start_line, end_line)}"
+    return source
+
+
 async def _build_query_output(target_kb_id: str, result: Any) -> Any:
     if isinstance(result, dict) and result.get("kb_id") == target_kb_id and isinstance(result.get("results"), list):
-        return SearchOutputSchema(**result).model_dump()
-    return KnowledgeBase.build_search_output(target_kb_id, result)
+        output = SearchOutputSchema(**result).model_dump()
+    else:
+        output = KnowledgeBase.build_search_output(target_kb_id, result)
+
+    if not isinstance(output, dict) or not isinstance(output.get("results"), list):
+        return output
+    for item in output["results"]:
+        item["citation_source"] = _kb_citation_source(
+            target_kb_id,
+            str(item.get("file_id") or ""),
+            chunk_id=str(item.get("id") or ""),
+        )
+    return SearchOutputSchema(**output).model_dump()
 
 
 @tool(category="knowledge", tags=["知识库"], args_schema=QueryKBInput)
@@ -293,7 +321,18 @@ async def open_kb_document(
             offset=start_offset,
             limit=window_size,
         )
-        return OpenOutputSchema(kb_id=normalized_kb_id, file_id=normalized_file_id, **window).model_dump()
+        citation_source = _kb_citation_source(
+            normalized_kb_id,
+            normalized_file_id,
+            start_line=int(window.get("start_line") or 0),
+            end_line=int(window.get("end_line") or 0),
+        )
+        return OpenOutputSchema(
+            kb_id=normalized_kb_id,
+            file_id=normalized_file_id,
+            citation_source=citation_source,
+            **window,
+        ).model_dump()
 
     except Exception as e:
         logger.error(f"打开知识库文档失败: {e}")
@@ -353,7 +392,24 @@ async def find_kb_document(
             max_windows=max_windows,
             window_size=window_size,
         )
-        return FindOutputSchema(kb_id=normalized_kb_id, file_id=normalized_file_id, **result).model_dump()
+        windows = []
+        for window in result.get("windows") or []:
+            windows.append(
+                {
+                    **window,
+                    "citation_source": _kb_citation_source(
+                        normalized_kb_id,
+                        normalized_file_id,
+                        start_line=int(window.get("start_line") or 0),
+                        end_line=int(window.get("end_line") or 0),
+                    ),
+                }
+            )
+        return FindOutputSchema(
+            kb_id=normalized_kb_id,
+            file_id=normalized_file_id,
+            **{**result, "windows": windows},
+        ).model_dump()
     except Exception as e:
         logger.error(f"知识库文档内检索失败: {e}")
         return f"知识库文档内检索失败: {str(e)}"

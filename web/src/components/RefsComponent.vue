@@ -53,10 +53,8 @@
       >
         <BookOpen size="12" />
         <span class="sources-label">
-          来源
-          <template v-if="sourceCount > 0">
-            {{ sourceCount }}
-          </template>
+          <template v-if="citedSourceCount > 0">引用 {{ citedSourceCount }} · </template>
+          检索 {{ sourceCount }}
         </span>
         <ChevronDown :size="12" class="expand-icon" :class="{ rotated: isSourcesExpanded }" />
       </span>
@@ -64,8 +62,16 @@
 
     <!-- 来源详情面板 -->
     <div v-if="isSourcesExpanded" class="sources-panel-body">
-      <KnowledgeSourceSection v-if="knowledgeChunks.length > 0" :chunks="knowledgeChunks" />
-      <WebSearchSourceSection v-if="webSources.length > 0" :sources="webSources" />
+      <KnowledgeSourceSection
+        v-if="knowledgeChunks.length > 0"
+        ref="knowledgeSourceRef"
+        :chunks="knowledgeChunks"
+      />
+      <WebSearchSourceSection
+        v-if="webSources.length > 0"
+        ref="webSourceRef"
+        :sources="webSources"
+      />
     </div>
   </div>
 
@@ -90,7 +96,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, watch } from 'vue'
+import { ref, computed, nextTick, reactive, watch } from 'vue'
 import { useClipboard } from '@vueuse/core'
 import { message as antMessage } from 'ant-design-vue'
 import {
@@ -106,6 +112,7 @@ import {
 import { agentApi } from '@/apis'
 import KnowledgeSourceSection from '@/components/KnowledgeSourceSection.vue'
 import WebSearchSourceSection from '@/components/WebSearchSourceSection.vue'
+import { stripSourceCitations } from '@/utils/sourceCitations'
 
 const emit = defineEmits(['retry', 'openRefs'])
 const props = defineProps({
@@ -128,6 +135,8 @@ const msg = ref(props.message)
 
 // Sources state
 const isSourcesExpanded = ref(false)
+const knowledgeSourceRef = ref(null)
+const webSourceRef = ref(null)
 
 const knowledgeChunks = computed(() =>
   Array.isArray(props.sources?.knowledgeChunks) ? props.sources.knowledgeChunks : []
@@ -139,10 +148,23 @@ const webSources = computed(() =>
 const hasSources = computed(() => knowledgeChunks.value.length > 0 || webSources.value.length > 0)
 
 const sourceCount = computed(() => knowledgeChunks.value.length + webSources.value.length)
+const citedSourceCount = computed(
+  () => [...knowledgeChunks.value, ...webSources.value].filter((source) => source.citation_index).length
+)
 
 const toggleSources = () => {
   isSourcesExpanded.value = !isSourcesExpanded.value
 }
+
+const revealSource = async (citationSource) => {
+  if (!citationSource) return
+  isSourcesExpanded.value = true
+  await nextTick()
+  if (await knowledgeSourceRef.value?.revealSource?.(citationSource)) return
+  await webSourceRef.value?.revealSource?.(citationSource)
+}
+
+defineExpose({ revealSource })
 
 // Feedback state
 const feedbackState = reactive({
@@ -196,7 +218,7 @@ const isCopied = ref(false)
 const copyText = async (text) => {
   if (isSupported) {
     try {
-      await copy(text)
+      await copy(stripSourceCitations(text))
       antMessage.success('文本已复制到剪贴板')
       isCopied.value = true
       setTimeout(() => {

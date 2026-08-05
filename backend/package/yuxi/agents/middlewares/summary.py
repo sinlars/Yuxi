@@ -310,10 +310,11 @@ class YuxiSummarizationMiddleware(SummarizationMiddleware):
         self.tool_arg_max_length = tool_arg_max_length
 
     def _should_summarize(self, messages: list[AnyMessage], total_tokens: int) -> bool:
-        if not self._lc_helper._trigger_clauses:
+        trigger_clauses = getattr(self._lc_helper, "_trigger_clauses", []) or []
+        if not trigger_clauses:
             return False
 
-        for clause in self._lc_helper._trigger_clauses:
+        for clause in trigger_clauses:
             clause_met = True
             for kind, value in clause.items():
                 if kind == "messages":

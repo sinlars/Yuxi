@@ -884,9 +884,16 @@ class MilvusKB(KnowledgeBase):
             "file_id": file_id,
             "chunk_index": entity.get("chunk_index"),
         }
-        chunk = {"content": entity.get("content", ""), "metadata": metadata, "score": float(score or 0.0)}
+        normalized_score = float(score or 0.0)
+        chunk = {
+            "content": entity.get("content", ""),
+            "metadata": metadata,
+            "score": normalized_score,
+            # 图检索会使用 RRF 融合分覆盖 score；单独保留阈值实际作用的原始检索分。
+            "retrieval_score": normalized_score,
+        }
         if score_field:
-            chunk[score_field] = float(score or 0.0)
+            chunk[score_field] = normalized_score
         if include_distances:
             chunk["distance"] = hit.distance
         return chunk

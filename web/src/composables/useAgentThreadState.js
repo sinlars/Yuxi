@@ -25,6 +25,7 @@ export function useAgentThreadState({
         isStreaming: false,
         runStreamAbortController: null,
         activeRunId: null,
+        latestRunStatus: null,
         runLastSeq: '0-0',
         lastRetryableJobTry: null,
         replyLoadingVisible: false,

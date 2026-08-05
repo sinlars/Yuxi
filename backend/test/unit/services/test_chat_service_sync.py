@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -165,6 +166,31 @@ class _FakeConvRepo:
 
     async def bind_attachments_to_request(self, conversation_id: int, request_id: str, file_ids: list[str]):
         return []
+
+
+@pytest.mark.asyncio
+async def test_save_tool_message_serializes_mapping_as_json() -> None:
+    captured = {}
+
+    class FakeRepo:
+        async def update_tool_call_output(self, **kwargs):
+            captured.update(kwargs)
+
+    await svc._save_tool_message(
+        FakeRepo(),
+        {
+            "tool_call_id": "call-search-1",
+            "content": {
+                "results": [
+                    {"title": "示例来源", "url": "https://example.com", "content": "中文内容"}
+                ]
+            },
+        },
+    )
+
+    assert captured["langgraph_tool_call_id"] == "call-search-1"
+    assert captured["status"] == "success"
+    assert json.loads(captured["tool_output"])["results"][0]["content"] == "中文内容"
 
 
 @pytest.mark.asyncio

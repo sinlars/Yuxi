@@ -98,13 +98,27 @@
           <a-spin tip="正在加载分块内容..." />
         </div>
         <div v-else class="chunk-grid">
-          <div v-for="chunk in mappedChunks" :key="chunk.id" class="chunk-card">
+          <div
+            v-for="chunk in displayChunks"
+            :key="chunk.id"
+            class="chunk-card"
+            :class="{ expanded: expandedChunkId === chunk.id }"
+            role="button"
+            tabindex="0"
+            :aria-expanded="expandedChunkId === chunk.id"
+            @click="toggleChunk(chunk.id)"
+            @keydown.enter="toggleChunk(chunk.id)"
+            @keydown.space.prevent="toggleChunk(chunk.id)"
+          >
             <div class="chunk-card-header">
               <span class="chunk-order">#{{ chunk.chunk_order_index }}</span>
+              <span class="chunk-card-meta">
+                约 {{ chunk.approximateTokenCount }} Token
+                <ChevronUp v-if="expandedChunkId === chunk.id" :size="14" />
+                <ChevronDown v-else :size="14" />
+              </span>
             </div>
-            <div class="chunk-card-content">
-              {{ chunk.content.replace(/\n+/g, ' ') }}
-            </div>
+            <div class="chunk-card-content">{{ chunk.content }}</div>
           </div>
         </div>
         <div v-if="!contentState.loading && mappedChunks.length === 0" class="empty-content">
@@ -135,7 +149,15 @@ import {
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import AgentFilePreview from '@/components/AgentFilePreview.vue'
-import { Download, ChevronDown, FileSearch, FileText, Rows3, X } from 'lucide-vue-next'
+import {
+  ChevronDown,
+  ChevronUp,
+  Download,
+  FileSearch,
+  FileText,
+  Rows3,
+  X
+} from 'lucide-vue-next'
 
 const props = defineProps({
   open: {
@@ -164,6 +186,7 @@ const basicLoading = ref(false)
 const detailError = ref('')
 const downloadingOriginal = ref(false)
 const downloadingMarkdown = ref(false)
+const expandedChunkId = ref(null)
 const contentState = ref({
   loading: false,
   loaded: false,
@@ -192,6 +215,7 @@ const revokeSourcePreviewUrl = () => {
 }
 
 const resetContentState = () => {
+  expandedChunkId.value = null
   contentState.value = {
     loading: false,
     loaded: false,
@@ -435,6 +459,14 @@ watch(
 // 统计信息
 const mergeResult = computed(() => mergeChunks(contentState.value.lines || []))
 const mappedChunks = computed(() => mergeResult.value.chunks)
+const displayChunks = computed(() =>
+  mappedChunks.value.map((chunk) => ({
+    ...chunk,
+    // 与后端 Book 分块器使用相同的轻量规则，明确标注为近似值。
+    approximateTokenCount:
+      chunk.content?.match(/[A-Za-z0-9_]+|[\u4e00-\u9fff]/g)?.length || 0
+  }))
+)
 const mergedContent = computed(() => contentState.value.content || mergeResult.value.content || '')
 const charCount = computed(() => mergedContent.value.length)
 const chunkCount = computed(
@@ -454,6 +486,10 @@ const viewInfoText = computed(() => {
   if (contentState.value.loading) return ''
   return `${formatTextLength(charCount.value)} 字符`
 })
+
+const toggleChunk = (chunkId) => {
+  expandedChunkId.value = expandedChunkId.value === chunkId ? null : chunkId
+}
 
 // 格式化文本长度
 function formatTextLength(length) {
@@ -688,6 +724,7 @@ onBeforeUnmount(resetLocalState)
   border: 1px solid var(--gray-200);
   border-radius: 8px;
   padding: 12px;
+  cursor: pointer;
   transition: all 0.2s ease;
 }
 
@@ -696,9 +733,22 @@ onBeforeUnmount(resetLocalState)
   box-shadow: 0 2px 8px rgba(1, 97, 121, 0.1);
 }
 
+.chunk-card:focus-visible {
+  outline: 2px solid var(--main-color);
+  outline-offset: 2px;
+}
+
+.chunk-card.expanded {
+  grid-column: 1 / -1;
+  border-color: var(--main-color);
+  box-shadow: 0 2px 8px rgba(1, 97, 121, 0.1);
+}
+
 .chunk-card-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 8px;
 }
 
@@ -708,15 +758,33 @@ onBeforeUnmount(resetLocalState)
   font-size: 12px;
 }
 
+.chunk-card-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--gray-400);
+  font-size: 12px;
+}
+
 .chunk-card-content {
   font-size: 12px;
   color: var(--gray-600);
   line-height: 1.5;
+  white-space: normal;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 6;
   -webkit-box-orient: vertical;
+}
+
+.chunk-card.expanded .chunk-card-content {
+  display: block;
+  max-height: 420px;
+  padding-right: 8px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 </style>
 

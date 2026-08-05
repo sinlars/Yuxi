@@ -31,6 +31,7 @@ const props = defineProps({
     default: false
   }
 })
+const emit = defineEmits(['citation-click'])
 
 const themeStore = useThemeStore()
 const shikiTheme = computed(() => (themeStore.isDark ? 'github-dark' : 'github-light'))
@@ -361,6 +362,12 @@ const handleMarkdownAction = async (e) => {
   const target = e.target instanceof Element ? e.target : e.target?.parentElement
   if (!target) return
 
+  const citation = target.closest('.source-citation')
+  if (citation) {
+    emit('citation-click', citation.dataset.citationSource || '', citation.getBoundingClientRect())
+    return
+  }
+
   const codeCopyBtn = target.closest('.markdown-code-copy-btn')
   if (codeCopyBtn) {
     await copyCodeBlock(codeCopyBtn)
@@ -517,6 +524,30 @@ const showCopiedFeedback = (btn) => {
   line-height: 1.75;
   word-break: break-word;
   padding: 0;
+
+  .source-citation {
+    width: 18px;
+    height: 18px;
+    margin: 0 2px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    vertical-align: super;
+    background: var(--color-info-10);
+    color: var(--main-color);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+
+    &:hover {
+      background: var(--main-color);
+      color: var(--gray-0);
+    }
+  }
 
   &.is-compact {
     font-size: 14px;

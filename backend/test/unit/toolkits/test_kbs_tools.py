@@ -123,6 +123,7 @@ async def test_query_kb_returns_search_schema_without_sandbox_paths(monkeypatch)
     assert result["results"][0]["file_id"] == "file-1"
     assert result["results"][0]["content"] == "auth guide"
     assert result["results"][0]["metadata"]["source"] == "auth-guide.pdf"
+    assert result["results"][0]["citation_source"] == "kb://db-1/file-1?chunk=file-1%3A1"
     assert "filepath" not in result["results"][0]["metadata"]
     assert "parsed_path" not in result["results"][0]["metadata"]
 
@@ -163,6 +164,7 @@ async def test_query_kb_allows_dify_knowledge_base(monkeypatch) -> None:
                     "source": "Dify Doc",
                     "score": 0.98,
                 },
+                "citation_source": "kb://db-1/dify-doc-1?chunk=dify-segment-1",
             }
         ],
     }
@@ -208,6 +210,7 @@ async def test_query_kb_maps_full_doc_id_and_chunk_metadata(monkeypatch) -> None
         "file_id": "file-1",
         "content": "auth guide",
         "metadata": {"chunk_index": 3},
+        "citation_source": "kb://db-1/file-1?chunk=chunk-1",
     }
 
 
@@ -269,6 +272,7 @@ async def test_find_kb_document_returns_context_windows(monkeypatch) -> None:
                 "end_line": 3,
                 "matched_lines": [2],
                 "content": "     1\tintro\n     2\ttoken value\n     3\toutro",
+                "citation_source": "kb://db-1/file-1?lines=1-3",
             }
         ],
     }
@@ -316,6 +320,7 @@ async def test_open_kb_document_reads_markdown_content_by_default_window(monkeyp
     assert result["has_more_before"] is False
     assert result["has_more_after"] is True
     assert result["next_offset"] == 1800
+    assert result["citation_source"] == "kb://db-1/file-1?lines=1-1800"
     assert "     1\tline 1" in result["content"]
     assert "  1800\tline 1800" in result["content"]
 

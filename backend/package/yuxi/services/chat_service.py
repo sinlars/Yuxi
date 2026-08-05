@@ -451,8 +451,8 @@ async def _save_tool_message(conv_repo: ConversationRepository, msg_dict: dict) 
     if not tool_call_id:
         return
 
-    if isinstance(content, list):
-        tool_output = json.dumps(content) if content else ""
+    if isinstance(content, (dict, list)):
+        tool_output = json.dumps(content, ensure_ascii=False, default=str) if content else ""
     else:
         tool_output = str(content)
 
@@ -1380,7 +1380,10 @@ async def get_agent_state_view(
         context = _build_agent_context(agent, input_context)
         state = await _read_checkpoint_state(agent, uid=current_uid, thread_id=thread_id, context=context)
         values = getattr(state, "values", {}) if state else {}
-        response = {"agent_state": extract_agent_state(values)}
+        response = {
+            "agent_state": extract_agent_state(values),
+            "latest_run_status": getattr(latest_run, "status", None),
+        }
         relation = await SubagentThreadRepository(db).get_by_child_conversation_for_user(
             conversation.id,
             str(current_uid),

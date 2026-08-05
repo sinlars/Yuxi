@@ -78,6 +78,7 @@
                     :message="displayItem.message"
                     :is-processing="isDisplayMessageProcessing(row.conv, displayItem)"
                     :show-refs="showMsgRefs(displayItem.message, row.conv)"
+                    :sources="getConversationSources(row.conv)"
                     :hide-tool-calls="true"
                     :mention="mentionConfig"
                     @retry="retryMessage(displayItem.message)"
@@ -339,6 +340,9 @@
                           {{ todo.displayContent }}
                         </span>
                       </div>
+                      <span v-if="todo.status === 'cancelled'" class="todo-item-status">
+                        已取消
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -1210,8 +1214,13 @@ const currentTodos = computed(() => {
   if (!Array.isArray(todos)) return []
   return todos.map((todo) => {
     const fullContent = String(todo?.content || '')
+    const status =
+      currentThreadState.value?.latestRunStatus === 'cancelled' && todo?.status !== 'completed'
+        ? 'cancelled'
+        : todo?.status
     return {
       ...todo,
+      status,
       fullContent,
       displayContent: formatTodoName(fullContent)
     }
@@ -1727,7 +1736,8 @@ const conversations = computed(() => {
   if (activeRunOngoingMessages.length > 0) {
     const onGoingConv = {
       messages: activeRunOngoingMessages,
-      status: 'streaming'
+      // finished 消息可能先于历史刷新到达，立即进入完成态以展示操作栏和实时工具来源。
+      status: currentThreadState.value?.isStreaming ? 'streaming' : 'finished'
     }
     return [...activeRunHistoryConvs, onGoingConv]
   }
@@ -2199,6 +2209,7 @@ const fetchAgentState = async (agentId, threadId) => {
     const targetState = getThreadState(threadId)
     if (!targetState) return
     targetState.agentState = res.agent_state || null
+    targetState.latestRunStatus = res.latest_run_status || null
   } catch {
     // agent state is optional UI state
   }
@@ -2810,9 +2821,25 @@ const showMsgRefs = (msg, conv) => {
   return false
 }
 
-const getConversationSources = (conv) => {
-  return MessageProcessor.extractSourcesFromConversation(conv, availableKnowledgeBases.value)
-}
+const conversationSources = computed(() => {
+  const result = new Map()
+  const previousConversations = []
+  for (const conv of conversations.value) {
+    result.set(
+      conv,
+      MessageProcessor.extractSourcesFromConversation(
+        conv,
+        availableKnowledgeBases.value,
+        previousConversations
+      )
+    )
+    previousConversations.push(conv)
+  }
+  return result
+})
+
+const getConversationSources = (conv) =>
+  conversationSources.value.get(conv) || { knowledgeChunks: [], webSources: [] }
 
 // ==================== LIFECYCLE & WATCHERS ====================
 const loadChatsList = async () => {
@@ -3946,6 +3973,13 @@ watch(currentChatId, (threadId, oldThreadId) => {
 
 .todo-item-body {
   min-width: 0;
+  flex: 1;
+}
+
+.todo-item-status {
+  flex-shrink: 0;
+  color: var(--color-error-700);
+  font-size: 12px;
 }
 
 .todo-item-text {

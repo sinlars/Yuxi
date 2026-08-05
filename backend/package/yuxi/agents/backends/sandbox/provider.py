@@ -240,6 +240,25 @@ class ProvisionerSandboxProvider:
                 record=record,
             )
 
+    def destroy(
+        self,
+        thread_id: str,
+        *,
+        uid: str,
+        file_thread_id: str | None = None,
+        skills_thread_id: str | None = None,
+    ) -> None:
+        """Destroy one execution sandbox while preserving its mounted files."""
+        file_id = str(file_thread_id or thread_id).strip()
+        skills_id = str(skills_thread_id or thread_id).strip()
+        cache_key = _sandbox_key(uid, file_id, skills_id)
+        sandbox_id = sandbox_id_for_thread(file_id, skills_id, uid=uid)
+        lock = self._thread_lock(cache_key)
+        with lock:
+            self._client.delete(sandbox_id)
+            self._connections.pop(cache_key, None)
+            self._last_touch_at.pop(cache_key, None)
+
     def shutdown(self) -> None:
         with self._lock:
             connections = list(self._connections.values())

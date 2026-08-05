@@ -10,7 +10,7 @@
   >
     <div v-if="chunk" class="detail-meta">
       <span v-if="typeof chunk.score === 'number'" class="score"
-        >相似度 {{ (chunk.score * 100).toFixed(1) }}%</span
+        >检索分 {{ Number(chunk.score).toFixed(3) }}</span
       >
       <span v-if="chunk.metadata?.chunk_id" class="meta-item"
         >chunk_id: {{ chunk.metadata.chunk_id }}</span

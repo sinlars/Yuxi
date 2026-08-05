@@ -175,6 +175,7 @@
               <div class="status-row">
                 <span class="status-label">状态</span>
                 <a-tag v-if="isBuildActive" color="blue" size="small">构建中</a-tag>
+                <a-tag v-else-if="isGraphIndexComplete" color="green" size="small">构建完成</a-tag>
                 <a-tag v-else-if="isBuildFailed" color="red" size="small">构建失败</a-tag>
                 <a-tag v-else-if="graphBuildStatus?.locked" color="green" size="small"
                   >已配置</a-tag
@@ -328,6 +329,24 @@
               v-model:value="graphConfigForm.concurrency_count"
               :min="1"
               :max="1000"
+              :step="1"
+              style="width: 100%"
+            />
+          </a-form-item>
+          <a-form-item label="请求超时（秒）">
+            <a-input-number
+              v-model:value="graphConfigForm.request_timeout_seconds"
+              :min="30"
+              :max="600"
+              :step="10"
+              style="width: 100%"
+            />
+          </a-form-item>
+          <a-form-item label="超时重试次数">
+            <a-input-number
+              v-model:value="graphConfigForm.timeout_retries"
+              :min="0"
+              :max="3"
               :step="1"
               style="width: 100%"
             />
@@ -505,6 +524,8 @@ const graphConfigForm = reactive({
   model_spec: '',
   schema: '',
   concurrency_count: 50,
+  request_timeout_seconds: 180,
+  timeout_retries: 1,
   model_params_text: ''
 })
 
@@ -585,6 +606,8 @@ const fillGraphConfigForm = () => {
   graphConfigForm.model_spec = options.model_spec || configStore.config?.default_model || ''
   graphConfigForm.schema = options.schema || ''
   graphConfigForm.concurrency_count = Number(options.concurrency_count || 50)
+  graphConfigForm.request_timeout_seconds = Number(options.request_timeout_seconds || 180)
+  graphConfigForm.timeout_retries = Number(options.timeout_retries ?? 1)
   graphConfigForm.model_params_text = options.model_params
     ? JSON.stringify(options.model_params)
     : ''
@@ -605,6 +628,8 @@ const buildExtractorOptions = () => {
     model_spec: graphConfigForm.model_spec,
     schema: graphConfigForm.schema.trim(),
     concurrency_count: graphConfigForm.concurrency_count || 50,
+    request_timeout_seconds: graphConfigForm.request_timeout_seconds || 180,
+    timeout_retries: graphConfigForm.timeout_retries ?? 1,
     model_params: parseModelParams()
   }
 }
@@ -1000,6 +1025,7 @@ onUnmounted(() => {
   .panel-body {
     padding: 10px 14px;
   }
+
 }
 
 .build-panel {

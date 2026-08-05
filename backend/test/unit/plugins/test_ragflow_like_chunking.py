@@ -149,6 +149,90 @@ def test_book_chunking_should_apply_overlength_protection() -> None:
     assert max(count_tokens(ck["content"]) for ck in chunks) <= max_chunk_tokens
 
 
+def test_book_chunking_should_aggregate_body_lines_and_repeat_heading_context() -> None:
+    first_section_lines = [f"正文段落{i}用于验证教材正文能够连续聚合，而不是每行生成一个片段。" for i in range(1, 25)]
+    second_section_lines = [f"基本原则正文{i}用于验证不同小节保持各自的标题上下文。" for i in range(1, 13)]
+    content = "\n".join(
+        [
+            "第一章 总则",
+            "第一节 适用范围",
+            *first_section_lines,
+            "第二节 基本原则",
+            *second_section_lines,
+        ]
+    )
+    max_chunk_tokens = 90
+
+    chunks = chunk_markdown(
+        markdown_content=content,
+        file_id="file_book_sections",
+        filename="book.txt",
+        processing_params={
+            "chunk_preset_id": "book",
+            "chunk_parser_config": {
+                "chunk_token_num": max_chunk_tokens,
+                "overlapped_percent": 10,
+            },
+        },
+    )
+
+    assert len(chunks) < len(first_section_lines) + len(second_section_lines)
+    assert all(count_tokens(chunk["content"]) <= max_chunk_tokens for chunk in chunks)
+    assert all("第一章 总则" in chunk["content"] for chunk in chunks)
+
+    first_section_chunks = [chunk["content"] for chunk in chunks if "正文段落" in chunk["content"]]
+    assert first_section_chunks
+    assert all("第一节 适用范围" in chunk for chunk in first_section_chunks)
+    assert any("正文段落1" in chunk and "正文段落2" in chunk for chunk in first_section_chunks)
+
+    second_section_chunks = [chunk["content"] for chunk in chunks if "基本原则正文" in chunk["content"]]
+    assert second_section_chunks
+    assert all("第二节 基本原则" in chunk for chunk in second_section_chunks)
+
+    repeated_chunks = chunk_markdown(
+        markdown_content=content,
+        file_id="file_book_sections",
+        filename="book.txt",
+        processing_params={
+            "chunk_preset_id": "book",
+            "chunk_parser_config": {
+                "chunk_token_num": max_chunk_tokens,
+                "overlapped_percent": 10,
+            },
+        },
+    )
+    assert [chunk["content"] for chunk in repeated_chunks] == [chunk["content"] for chunk in chunks]
+
+
+def test_book_chunking_should_remove_long_contents_table() -> None:
+    contents_lines = [f"第{i}节 目录项目/{i}" for i in range(1, 181)]
+    content = "\n".join(
+        [
+            "目录",
+            "导言/1",
+            *contents_lines,
+            "导言",
+            "第一章 总则",
+            "第一节 正文",
+            "这是教材正文，不应与前面的长目录混在一起。",
+        ]
+    )
+
+    chunks = chunk_markdown(
+        markdown_content=content,
+        file_id="file_book_toc",
+        filename="book.txt",
+        processing_params={
+            "chunk_preset_id": "book",
+            "chunk_parser_config": {"chunk_token_num": 256},
+        },
+    )
+
+    assert chunks
+    assert all("目录项目" not in chunk["content"] for chunk in chunks)
+    assert any("这是教材正文" in chunk["content"] for chunk in chunks)
+
+
 def test_split_sentences_chinese_should_keep_quote_boundary() -> None:
     text = '他说：“你好。”然后问：“你在吗？”最后结束！'
     sentences = split_sentences_chinese(text)
