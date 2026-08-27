@@ -37,6 +37,21 @@ def load_chat_model(fully_specified_name: str | None, **kwargs) -> BaseChatModel
 
     api_key = info.api_key
     base_url = get_docker_safe_url(info.base_url)
+    # if info.request_body_overrides:
+    #     extra_body = dict(kwargs.get("extra_body") or {})
+    #     extra_body.update(info.request_body_overrides)
+    #     kwargs = {**kwargs, "extra_body": extra_body}
+
+    # metadata = dict(kwargs.pop("metadata", {}) or {})
+    # metadata.update(
+    #     {
+    #         "yuxi_provider_id": info.provider_id,
+    #         "yuxi_provider_type": info.provider_type,
+    #         "yuxi_model_id": info.model_id,
+    #         "yuxi_model_spec": info.spec,
+    #     }
+    # )
+    # kwargs["metadata"] = metadata
 
     logger.debug(f"Loading model {fully_specified_name} with provider_type={info.provider_type}")
 
@@ -58,7 +73,7 @@ def load_chat_model(fully_specified_name: str | None, **kwargs) -> BaseChatModel
             **kwargs,
         )
 
-    return _ToolCallChunkFixChatOpenAI(
+    return ChatOpenAI(
         model=info.model_id,
         api_key=SecretStr(api_key),
         base_url=base_url,

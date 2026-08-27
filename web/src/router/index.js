@@ -145,6 +145,12 @@ const router = createRouter({
       ]
     },
     {
+      path: '/resource',
+      name: 'Resource',
+      component: () => import('../views/ResourceView.vue'),
+      meta: { keepAlive: false, requiresAuth: true }
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'NotFound',
       component: () => import('../views/EmptyView.vue'),

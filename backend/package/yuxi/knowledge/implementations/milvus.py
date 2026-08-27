@@ -20,6 +20,7 @@ from pymilvus import (
     db,
     utility,
 )
+from pymilvus.exceptions import ConnectionNotExistException, MilvusException
 
 from yuxi.knowledge.base import FileStatus, KnowledgeBase
 from yuxi.knowledge.chunking.ragflow_like.dispatcher import chunk_markdown
@@ -326,9 +327,9 @@ class MilvusKB(KnowledgeBase):
 
             # 创建数据库（如果不存在）
             try:
-                if self.milvus_db not in db.list_database():
-                    db.create_database(self.milvus_db)
-                db.using_database(self.milvus_db)
+                if self.milvus_db not in db.list_database(using=self.connection_alias):
+                    db.create_database(self.milvus_db, using=self.connection_alias)
+                db.using_database(self.milvus_db, using=self.connection_alias)
             except Exception as e:
                 logger.warning(f"Database operation failed, using default: {e}")
 
@@ -337,6 +338,13 @@ class MilvusKB(KnowledgeBase):
         except Exception as e:
             logger.error(f"Failed to connect to Milvus: {e}")
             raise
+
+    def _ensure_connection(self):
+        """确保 Milvus 连接可用，如已断开则重新建立"""
+        if connections.has_connection(self.connection_alias):
+            return
+        logger.info(f"Milvus connection '{self.connection_alias}' not found, re-establishing")
+        self._init_connection()
 
     async def _create_kb_instance(self, kb_id: str, kb_config: dict) -> Any:
         """创建 Milvus 集合"""
@@ -354,6 +362,8 @@ class MilvusKB(KnowledgeBase):
             raise ValueError(f"Unsupported embedding model: {embedding_model_spec}")
 
         collection_name = kb_id
+
+        self._ensure_connection()
 
         try:
             # 检查集合是否存在
@@ -383,7 +393,7 @@ class MilvusKB(KnowledgeBase):
                 logger.info(f"Collection {collection_name} not found, creating new one")
                 return self._create_new_collection(collection_name, embedding_info, kb_id)
 
-        except (connections.MilvusException, RuntimeError) as e:
+        except (ConnectionNotExistException, MilvusException, RuntimeError) as e:
             logger.error(f"Error checking collection {collection_name}: {e}")
             raise
         except Exception as e:
