@@ -4,8 +4,100 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from yuxi.agents.skills import remote_install as svc
+
+
+@pytest.fixture(autouse=True)
+def remote_skill_source_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def get_policy(_db=None) -> dict[str, list[str]]:
+        return {"allowed_hosts": ["github.com", "modelscope.cn"]}
+
+    monkeypatch.setattr(svc, "remote_skill_source_policy", SimpleNamespace(get=get_policy))
+
+
+class _FakeRemoteSkillSandbox:
+    def __init__(self, *, output: str = "installed", available: set[str] | None = None, run_error: bool = False):
+        self.output = output
+        self.available = available or set()
+        self.run_error = run_error
+        self.calls: list[list[str]] = []
+        self.download_calls: list[str] = []
+        self.cleaned = False
+
+    async def run(self, args: list[str]) -> str:
+        self.calls.append(args)
+        if self.run_error:
+            raise ValueError("CLI failed")
+        return self.output
+
+    async def download_skill(self, name: str, target_dir: Path) -> None:
+        self.download_calls.append(name)
+        if name not in self.available:
+            raise ValueError("missing")
+        target_dir.mkdir(parents=True)
+
+    async def cleanup(self) -> None:
+        self.cleaned = True
+
+
+def _use_fake_sandbox(monkeypatch: pytest.MonkeyPatch, sandbox: _FakeRemoteSkillSandbox) -> None:
+    monkeypatch.setattr(svc, "_RemoteSkillSandbox", SimpleNamespace(create=lambda: sandbox))
+
+
+@pytest.mark.parametrize(
+    ("source", "allowed_hosts", "expected"),
+    [
+        ("anthropics/skills", ["github.com", "modelscope.cn"], "https://github.com/anthropics/skills"),
+        (
+            "https://github.com/anthropics/skills.git",
+            ["github.com", "modelscope.cn"],
+            "https://github.com/anthropics/skills",
+        ),
+        (
+            "https://modelscope.cn/skills/@pskoett/self-improving-agent/",
+            ["github.com", "modelscope.cn"],
+            "https://modelscope.cn/skills/@pskoett/self-improving-agent",
+        ),
+        (
+            "https://skills.example.com/catalog/demo/",
+            ["skills.example.com"],
+            "https://skills.example.com/catalog/demo",
+        ),
+        ("anthropics/skills", [" GitHub.com. "], "https://github.com/anthropics/skills"),
+    ],
+)
+def test_normalize_source_accepts_allowed_skill_sources(
+    source: str,
+    allowed_hosts: list[str],
+    expected: str,
+) -> None:
+    assert svc._normalize_source(source, allowed_hosts) == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://example.com/skills/demo",
+        "https://sub.modelscope.cn/skills/demo",
+        "https://www.github.com/anthropics/skills",
+        "http://modelscope.cn/skills/demo",
+        "file:///tmp/skills",
+        "https://modelscope.cn/skills/demo?download=1",
+        "../..",
+        "./repo",
+        "owner/..",
+    ],
+)
+def test_normalize_source_rejects_sources_outside_allowlist(
+    source: str,
+) -> None:
+    with pytest.raises(ValueError, match="远程 Skill 来源白名单"):
+        svc._normalize_source(source, ["github.com", "modelscope.cn"])
+
+
+def test_normalize_source_rejects_all_sources_when_allowlist_is_empty() -> None:
+    with pytest.raises(ValueError, match="远程 Skill 来源白名单"):
+        svc._normalize_source("anthropics/skills", [])
 
 
 def test_parse_available_skills_from_cli_output() -> None:
@@ -37,13 +129,8 @@ def test_parse_available_skills_from_cli_output() -> None:
 
 @pytest.mark.asyncio
 async def test_list_remote_skills_uses_isolated_home(monkeypatch: pytest.MonkeyPatch):
-    captured: dict[str, object] = {}
-
-    async def fake_run_skills_cli(args: list[str], *, env: dict[str, str], cwd: str) -> str:
-        captured["args"] = args
-        captured["home"] = env["HOME"]
-        captured["cwd"] = cwd
-        return """
+    sandbox = _FakeRemoteSkillSandbox(
+        output="""
         ◇  Available Skills
 
             frontend-design
@@ -52,265 +139,214 @@ async def test_list_remote_skills_uses_isolated_home(monkeypatch: pytest.MonkeyP
 
         └  Use --skill <name> to install specific skills
         """
-
-    monkeypatch.setattr(svc, "_run_skills_cli", fake_run_skills_cli)
+    )
+    _use_fake_sandbox(monkeypatch, sandbox)
 
     items = await svc.list_remote_skills("anthropics/skills")
 
     assert items == [{"name": "frontend-design", "description": "Create distinctive frontend interfaces."}]
-    assert captured["args"] == ["npx", "-y", "skills", "add", "anthropics/skills", "--list"]
-    assert str(captured["cwd"]).startswith(str(captured["home"]))
+    assert sandbox.calls == [["npx", "-y", "skills", "add", "https://github.com/anthropics/skills", "--list"]]
+    assert sandbox.cleaned is True
 
 
 @pytest.mark.asyncio
-async def test_install_remote_skill_imports_from_cli_output_dir(monkeypatch: pytest.MonkeyPatch):
-    calls: list[tuple[list[str], str]] = []
+async def test_remote_skill_sandbox_executes_cli_through_provisioner_backend():
+    calls: list[str] = []
 
-    async def fake_run_skills_cli(args: list[str], *, env: dict[str, str], cwd: str) -> str:
-        calls.append((args, env["HOME"]))
-        home = Path(env["HOME"])
-        if "--list" in args:
-            return """
-            ◇  Available Skills
+    class FakeBackend:
+        def execute(self, command: str, *, timeout: int):
+            assert timeout == svc.CLI_TIMEOUT_SECONDS
+            calls.append(command)
+            return SimpleNamespace(output="done", exit_code=0)
 
-                frontend-design
-
-                  Create distinctive frontend interfaces.
-
-            └  Use --skill <name> to install specific skills
-            """
-        skill_dir = home / ".agents" / "skills" / "frontend-design"
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        (skill_dir / "SKILL.md").write_text(
-            "---\nname: frontend-design\ndescription: demo\n---\n# Demo\n",
-            encoding="utf-8",
-        )
-        return "installed"
-
-    captured: dict[str, object] = {}
-
-    async def fake_import_skill_dir(_db, *, source_dir, created_by):
-        captured["source_dir"] = Path(source_dir)
-        captured["created_by"] = created_by
-        return {"slug": "frontend-design"}
-
-    monkeypatch.setattr(svc, "_run_skills_cli", fake_run_skills_cli)
-    monkeypatch.setattr(svc, "import_skill_dir", fake_import_skill_dir)
-
-    item = await svc.install_remote_skill(
-        None,
-        source="anthropics/skills",
-        skill="frontend-design",
-        created_by="root",
+    sandbox = svc._RemoteSkillSandbox(
+        thread_id="remote-skill-test",
+        home=f"{svc.REMOTE_SKILL_SANDBOX_ROOT}/.remote-skill-test",
+        backend=FakeBackend(),
     )
 
-    assert item == {"slug": "frontend-design"}
-    assert calls[0][0] == ["npx", "-y", "skills", "add", "anthropics/skills", "--list"]
-    assert calls[1][0] == [
-        "npx",
-        "-y",
-        "skills",
-        "add",
-        "anthropics/skills",
-        "--skill",
-        "frontend-design",
-        "-g",
-        "-y",
-        "--copy",
-    ]
-    assert captured["source_dir"] == Path(calls[1][1]) / ".agents" / "skills" / "frontend-design"
-    assert captured["created_by"] == "root"
+    output = await sandbox.run(["npx", "-y", "skills", "add", "https://github.com/owner/repo", "--list"])
+
+    assert output == "done"
+    assert len(calls) == 1
+    assert f"HOME={sandbox.home}" in calls[0]
+    assert "npx -y skills add https://github.com/owner/repo --list" in calls[0]
 
 
 @pytest.mark.asyncio
-async def test_install_remote_skill_rejects_missing_remote_skill(monkeypatch: pytest.MonkeyPatch):
-    async def fake_run_skills_cli(args: list[str], *, env: dict[str, str], cwd: str) -> str:
-        return """
-        ◇  Available Skills
+async def test_remote_skill_sandbox_rejects_incomplete_command() -> None:
+    class FakeBackend:
+        def execute(self, _command: str, *, timeout: int):
+            assert timeout == svc.CLI_TIMEOUT_SECONDS
+            return SimpleNamespace(output="still running", exit_code=None)
 
-            other-skill
+    sandbox = svc._RemoteSkillSandbox(
+        thread_id="remote-skill-test",
+        home=f"{svc.REMOTE_SKILL_SANDBOX_ROOT}/.remote-skill-test",
+        backend=FakeBackend(),
+    )
 
-              Description
+    with pytest.raises(ValueError, match="still running"):
+        await sandbox.run(["npx", "-y", "skills", "add", "https://github.com/owner/repo", "--list"])
 
-        └  Use --skill <name> to install specific skills
-        """
 
-    monkeypatch.setattr(svc, "_run_skills_cli", fake_run_skills_cli)
+def test_remote_skill_sandbox_uses_unique_workspace_uid(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, str | bool] = {}
 
-    with pytest.raises(ValueError, match="不存在 skill"):
-        await svc.install_remote_skill(
-            None,
+    class FakeBackend:
+        def __init__(self, *, thread_id, uid, inherit_env):
+            captured["thread_id"] = thread_id
+            captured["uid"] = uid
+            captured["inherit_env"] = inherit_env
+
+    monkeypatch.setattr(svc, "ProvisionerSandboxBackend", FakeBackend)
+    sandbox = svc._RemoteSkillSandbox.create()
+
+    assert captured == {"thread_id": sandbox.thread_id, "uid": sandbox.thread_id, "inherit_env": False}
+
+
+@pytest.mark.asyncio
+async def test_prepare_remote_skills_batch_downloads_duplicate_skill_once(monkeypatch: pytest.MonkeyPatch):
+    sandbox = _FakeRemoteSkillSandbox(available={"frontend-design"})
+    _use_fake_sandbox(monkeypatch, sandbox)
+
+    preparation = await svc.prepare_remote_skills_batch(
+        source="anthropics/skills",
+        skills=["frontend-design", "frontend-design"],
+    )
+    try:
+        assert [item["success"] for item in preparation.results] == [True, True]
+        assert sandbox.download_calls == ["frontend-design"]
+        assert preparation.results[0]["source_dir"] == preparation.results[1]["source_dir"]
+    finally:
+        await preparation.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("skills", "available", "expected_results", "expected_cli_skills"),
+    [
+        (
+            ["skill-a", "skill-b", "skill-c"],
+            {"skill-a", "skill-c"},
+            [
+                {"slug": "skill-a", "success": True},
+                {"slug": "skill-b", "success": False, "error": "skills CLI 未生成预期的技能目录"},
+                {"slug": "skill-c", "success": True},
+            ],
+            ["skill-a", "skill-b", "skill-c"],
+        ),
+        (
+            ["valid-skill", "Bad Name", "another-valid"],
+            {"valid-skill"},
+            [
+                {"slug": "valid-skill", "success": True},
+                {"slug": "Bad Name", "success": False, "error": "skill 名称不合法"},
+                {"slug": "another-valid", "success": False, "error": "skills CLI 未生成预期的技能目录"},
+            ],
+            ["valid-skill", "another-valid"],
+        ),
+    ],
+)
+async def test_prepare_remote_skills_batch_preserves_partial_results(
+    monkeypatch: pytest.MonkeyPatch,
+    skills: list[str],
+    available: set[str],
+    expected_results: list[dict],
+    expected_cli_skills: list[str],
+):
+    sandbox = _FakeRemoteSkillSandbox(available=available)
+    _use_fake_sandbox(monkeypatch, sandbox)
+
+    preparation = await svc.prepare_remote_skills_batch(source="test/repo", skills=skills)
+    try:
+        results = [
+            {key: value for key, value in result.items() if key != "source_dir"} for result in preparation.results
+        ]
+        assert results == expected_results
+        assert len(sandbox.calls) == 1
+        cli_skill_names = [
+            sandbox.calls[0][index + 1] for index, arg in enumerate(sandbox.calls[0]) if arg == "--skill"
+        ]
+        assert cli_skill_names == expected_cli_skills
+    finally:
+        await preparation.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_prepare_remote_skills_batch_removes_temp_home_when_sandbox_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    sandbox = _FakeRemoteSkillSandbox(available={"frontend-design"})
+
+    async def fail_cleanup() -> None:
+        raise RuntimeError("cleanup failed")
+
+    def make_temp_home(*_args, **_kwargs) -> str:
+        temp_home = tmp_path / "remote-home"
+        temp_home.mkdir()
+        return str(temp_home)
+
+    sandbox.cleanup = fail_cleanup
+    _use_fake_sandbox(monkeypatch, sandbox)
+    monkeypatch.setattr(svc.tempfile, "mkdtemp", make_temp_home)
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await svc.prepare_remote_skills_batch(
             source="anthropics/skills",
-            skill="frontend-design",
-            created_by="root",
+            skills=["frontend-design"],
         )
+
+    assert not (tmp_path / "remote-home").exists()
 
 
 @pytest.mark.asyncio
-async def test_install_remote_skills_batch_installs_all(monkeypatch: pytest.MonkeyPatch):
-    calls: list[tuple[list[str], str]] = []
-    imported_skills: list[str] = []
+async def test_prepare_remote_skills_batch_creates_sandbox_before_temp_home(monkeypatch: pytest.MonkeyPatch):
+    def fail_create():
+        raise RuntimeError("provider init failed")
 
-    async def fake_run_skills_cli(args: list[str], *, env: dict[str, str], cwd: str) -> str:
-        calls.append((args, env["HOME"]))
-        home = Path(env["HOME"])
-        skill_dir_base = home / ".agents" / "skills"
-        for skill_name in ("frontend-design", "claude-api", "code-review"):
-            (skill_dir_base / skill_name).mkdir(parents=True, exist_ok=True)
-            (skill_dir_base / skill_name / "SKILL.md").write_text(
-                f"---\nname: {skill_name}\ndescription: demo\n---\n# {skill_name}\n",
-                encoding="utf-8",
-            )
-        return "installed"
-
-    async def fake_import_skill_dir(_db, *, source_dir, created_by):
-        imported_skills.append(source_dir.name)
-        return SimpleNamespace(slug=source_dir.name)
-
-    monkeypatch.setattr(svc, "_run_skills_cli", fake_run_skills_cli)
-    monkeypatch.setattr(svc, "import_skill_dir", fake_import_skill_dir)
-
-    results = await svc.install_remote_skills_batch(
-        None,
-        source="anthropics/skills",
-        skills=["frontend-design", "claude-api", "code-review"],
-        created_by="root",
+    monkeypatch.setattr(svc, "_RemoteSkillSandbox", SimpleNamespace(create=fail_create))
+    monkeypatch.setattr(
+        svc.tempfile,
+        "mkdtemp",
+        lambda **_kwargs: pytest.fail("Sandbox 初始化失败时不应创建宿主临时目录"),
     )
 
-    # Should only have 1 CLI call (no --list, direct batch install)
-    assert len(calls) == 1
-    assert calls[0][0] == [
-        "npx",
-        "-y",
-        "skills",
-        "add",
-        "anthropics/skills",
-        "--skill",
-        "frontend-design",
-        "--skill",
-        "claude-api",
-        "--skill",
-        "code-review",
-        "-g",
-        "-y",
-        "--copy",
+    with pytest.raises(RuntimeError, match="provider init failed"):
+        await svc.prepare_remote_skills_batch(source="anthropics/skills", skills=["frontend-design"])
+
+
+@pytest.mark.asyncio
+async def test_remote_skill_sandbox_cleanup_surfaces_release_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    release_calls: list[tuple[tuple, dict]] = []
+
+    class FakeProvider:
+        def release(self, *_args, **_kwargs):
+            release_calls.append((_args, _kwargs))
+            raise RuntimeError("release failed")
+
+    monkeypatch.setattr(svc, "get_sandbox_provider", lambda: FakeProvider())
+    sandbox = svc._RemoteSkillSandbox(
+        thread_id="remote-skill-test",
+        home="/home/gem/user-data/outputs/.remote-skill-test",
+        backend=SimpleNamespace(),
+    )
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        await sandbox.cleanup()
+
+    assert release_calls == [
+        (
+            ("remote-skill-test",),
+            {
+                "uid": "remote-skill-test",
+                "clear_cache_on_delete_failure": True,
+            },
+        )
     ]
-
-    assert len(results) == 3
-    assert all(r["success"] for r in results)
-    assert [r["slug"] for r in results] == ["frontend-design", "claude-api", "code-review"]
-    assert imported_skills == ["frontend-design", "claude-api", "code-review"]
-
-
-@pytest.mark.asyncio
-async def test_install_remote_skills_batch_skips_missing(monkeypatch: pytest.MonkeyPatch):
-    async def fake_run_skills_cli(args: list[str], *, env: dict[str, str], cwd: str) -> str:
-        home = Path(env["HOME"])
-        skill_dir_base = home / ".agents" / "skills"
-        (skill_dir_base / "frontend-design").mkdir(parents=True, exist_ok=True)
-        (skill_dir_base / "frontend-design" / "SKILL.md").write_text(
-            "---\nname: frontend-design\ndescription: demo\n---\n# Demo\n",
-            encoding="utf-8",
-        )
-        return "installed"
-
-    async def fake_import_skill_dir(_db, *, source_dir, created_by):
-        return SimpleNamespace(slug=source_dir.name)
-
-    monkeypatch.setattr(svc, "_run_skills_cli", fake_run_skills_cli)
-    monkeypatch.setattr(svc, "import_skill_dir", fake_import_skill_dir)
-
-    results = await svc.install_remote_skills_batch(
-        None,
-        source="anthropics/skills",
-        skills=["frontend-design", "nonexistent-skill"],
-        created_by="root",
-    )
-
-    assert len(results) == 2
-    assert results[0] == {"slug": "frontend-design", "success": True}
-    assert results[1] == {"slug": "nonexistent-skill", "success": False, "error": "skills CLI 未生成预期的技能目录"}
-
-
-@pytest.mark.asyncio
-async def test_install_remote_skills_batch_partial_failure(monkeypatch: pytest.MonkeyPatch):
-    calls: list[tuple[list[str], str]] = []
-
-    async def fake_run_skills_cli(args: list[str], *, env: dict[str, str], cwd: str) -> str:
-        calls.append((args, env["HOME"]))
-        home = Path(env["HOME"])
-        skill_dir_base = home / ".agents" / "skills"
-        (skill_dir_base / "skill-a").mkdir(parents=True, exist_ok=True)
-        (skill_dir_base / "skill-a" / "SKILL.md").write_text(
-            "---\nname: skill-a\ndescription: demo\n---\n# A\n",
-            encoding="utf-8",
-        )
-        # skill-b directory missing (simulate install failure from CLI side)
-        (skill_dir_base / "skill-c").mkdir(parents=True, exist_ok=True)
-        (skill_dir_base / "skill-c" / "SKILL.md").write_text(
-            "---\nname: skill-c\ndescription: demo\n---\n# C\n",
-            encoding="utf-8",
-        )
-        return "installed"
-
-    async def fake_import_skill_dir(_db, *, source_dir, created_by):
-        return SimpleNamespace(slug=source_dir.name)
-
-    monkeypatch.setattr(svc, "_run_skills_cli", fake_run_skills_cli)
-    monkeypatch.setattr(svc, "import_skill_dir", fake_import_skill_dir)
-
-    results = await svc.install_remote_skills_batch(
-        None,
-        source="test/repo",
-        skills=["skill-a", "skill-b", "skill-c"],
-        created_by="root",
-    )
-
-    assert len(results) == 3
-    assert results[0] == {"slug": "skill-a", "success": True}
-    assert results[1] == {"slug": "skill-b", "success": False, "error": "skills CLI 未生成预期的技能目录"}
-    assert results[2] == {"slug": "skill-c", "success": True}
-
-
-@pytest.mark.asyncio
-async def test_install_remote_skills_batch_handles_invalid_names(monkeypatch: pytest.MonkeyPatch):
-    calls: list[tuple[list[str], str]] = []
-
-    async def fake_run_skills_cli(args: list[str], *, env: dict[str, str], cwd: str) -> str:
-        calls.append((args, env["HOME"]))
-        home = Path(env["HOME"])
-        skill_dir_base = home / ".agents" / "skills"
-        (skill_dir_base / "valid-skill").mkdir(parents=True, exist_ok=True)
-        (skill_dir_base / "valid-skill" / "SKILL.md").write_text(
-            "---\nname: valid-skill\ndescription: demo\n---\n# Valid\n",
-            encoding="utf-8",
-        )
-        return "installed"
-
-    async def fake_import_skill_dir(_db, *, source_dir, created_by):
-        return SimpleNamespace(slug=source_dir.name)
-
-    monkeypatch.setattr(svc, "_run_skills_cli", fake_run_skills_cli)
-    monkeypatch.setattr(svc, "import_skill_dir", fake_import_skill_dir)
-
-    results = await svc.install_remote_skills_batch(
-        None,
-        source="test/repo",
-        skills=["valid-skill", "Bad Name", "another-valid"],
-        created_by="root",
-    )
-
-    assert len(results) == 3
-    assert results[0] == {"slug": "valid-skill", "success": True}
-    assert results[1]["success"] is False
-    assert "不合法" in results[1]["error"]
-    assert results[2] == {"slug": "another-valid", "success": False, "error": "skills CLI 未生成预期的技能目录"}
-
-    # Only valid skills passed to the CLI
-    assert len(calls) == 1
-    assert "--skill" in str(calls[0][0])
-    assert "valid-skill" in str(calls[0][0])
-    assert "Bad" not in str(calls[0][0])
 
 
 def test_parse_search_skills() -> None:
@@ -349,15 +385,12 @@ def test_parse_search_skills() -> None:
 
 @pytest.mark.asyncio
 async def test_search_remote_skills(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
-
-    async def fake_run_skills_cli(args: list[str], *, env: dict[str, str], cwd: str) -> str:
-        captured["args"] = args
-        return """
+    sandbox = _FakeRemoteSkillSandbox(
+        output="""
         vercel-labs/agent-skills@web-design-guidelines 339.3K installs
         """
-
-    monkeypatch.setattr(svc, "_run_skills_cli", fake_run_skills_cli)
+    )
+    _use_fake_sandbox(monkeypatch, sandbox)
 
     items = await svc.search_remote_skills("web")
     assert items == [
@@ -367,4 +400,5 @@ async def test_search_remote_skills(monkeypatch: pytest.MonkeyPatch) -> None:
             "installs": "339.3K installs",
         }
     ]
-    assert captured["args"] == ["npx", "-y", "skills", "find", "web"]
+    assert sandbox.calls == [["npx", "-y", "skills", "find", "web"]]
+    assert sandbox.cleaned is True

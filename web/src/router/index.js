@@ -3,6 +3,7 @@ import AppLayout from '@/layouts/AppLayout.vue'
 import BlankLayout from '@/layouts/BlankLayout.vue'
 import { useUserStore } from '@/stores/user'
 import { useAgentStore } from '@/stores/agent'
+import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
 import { sanitizeRedirect } from '@/utils/oidcAutoStart'
 
 const router = createRouter({
@@ -81,6 +82,67 @@ const router = createRouter({
           name: 'DashboardComp',
           component: () => import('../views/DashboardView.vue'),
           meta: { keepAlive: false, requiresAuth: true, requiresSuperAdmin: true }
+        }
+      ]
+    },
+    {
+      path: '/agent-manage',
+      name: 'agent-manage',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'AgentManageComp',
+          component: () => import('../views/AgentManageView.vue'),
+          meta: { keepAlive: false, requiresAuth: true }
+        }
+      ]
+    },
+    {
+      path: '/extensions',
+      name: 'extensions',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'ExtensionsComp',
+          component: () => import('../views/ExtensionsView.vue'),
+          meta: {
+            keepAlive: false,
+            requiresAuth: true
+          },
+          children: [
+            {
+              path: 'knowledgebase/:kbId',
+              name: 'ExtensionKnowledgeBaseDetail',
+              component: () => import('../views/DataBaseInfoView.vue'),
+              meta: {
+                keepAlive: false,
+                requiresAuth: true,
+                requiresAdmin: true,
+                requiresKnowledge: true
+              }
+            },
+            {
+              path: 'mcp/:slug',
+              name: 'ExtensionMcpDetail',
+              component: () => import('../components/extensions/McpDetailView.vue'),
+              meta: {
+                keepAlive: false,
+                requiresAuth: true,
+                requiresAdmin: true
+              }
+            },
+            {
+              path: 'skill/:slug',
+              name: 'ExtensionSkillDetail',
+              component: () => import('../components/extensions/SkillDetailView.vue'),
+              meta: {
+                keepAlive: false,
+                requiresAuth: true
+              }
+            }
+          ]
         }
       ]
     },
@@ -165,8 +227,13 @@ router.beforeEach(async (to) => {
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true)
   const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin)
   const requiresSuperAdmin = to.matched.some((record) => record.meta.requiresSuperAdmin)
+  const requiresKnowledge = to.matched.some((record) => record.meta.requiresKnowledge)
 
   const userStore = useUserStore()
+  const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
+  if (requiresAuth || requiresKnowledge) {
+    await runtimeCapabilitiesStore.ensureLoaded()
+  }
 
   // 如果有 token 但用户信息未加载，先获取用户信息
   if (userStore.token && !userStore.userId) {
@@ -218,6 +285,10 @@ router.beforeEach(async (to) => {
       console.error('获取智能体信息失败:', error)
       return '/agent'
     }
+  }
+
+  if (requiresKnowledge && !runtimeCapabilitiesStore.knowledgeEnabled) {
+    return { path: '/extensions', query: { tab: 'skills' } }
   }
 
   // 如果用户已登录但访问登录页，按 redirect 参数跳转

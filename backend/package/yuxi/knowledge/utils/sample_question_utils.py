@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from yuxi import config
+from yuxi.config.options import system_options
 from yuxi.knowledge.factory import KnowledgeBaseFactory
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.models import select_model
@@ -86,19 +86,19 @@ async def generate_database_sample_questions(kb_id: str, count: int = 10) -> dic
     if not db_info:
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
 
-    kb_type = (db_info.get("kb_type") or "").lower()
+    kb_type = db_info.kb_type.lower()
     if not KnowledgeBaseFactory.get_kb_class(kb_type).supports_documents:
-        raise HTTPException(status_code=400, detail=f"{db_info.get('name') or kb_type} 不支持基于文件生成测试问题")
+        raise HTTPException(status_code=400, detail=f"{db_info.name or kb_type} 不支持基于文件生成测试问题")
 
-    db_name = db_info.get("name", "")
-    all_files = db_info.get("files", {})
+    db_name = db_info.name
+    all_files = db_info.files or {}
     if not all_files:
         raise HTTPException(status_code=400, detail="知识库中没有文件")
 
     files_info = build_sample_question_file_list(all_files)
     logger.info(f"开始生成知识库问题，知识库: {db_name}, 文件数量: {len(files_info)}, 问题数量: {count}")
 
-    model = select_model(model_spec=config.default_model)
+    model = select_model(model_spec=(await system_options.get())["default_model"])
     messages = [
         {"role": "system", "content": SAMPLE_QUESTIONS_SYSTEM_PROMPT},
         {"role": "user", "content": build_sample_questions_user_message(db_name, files_info, count)},

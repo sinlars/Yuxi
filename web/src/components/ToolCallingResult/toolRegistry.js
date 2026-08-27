@@ -1,6 +1,7 @@
 import {
   BookOpen,
   Bot,
+  Brain,
   Calculator,
   CheckSquare,
   Database,
@@ -16,7 +17,7 @@ import {
   Network,
   RefreshCw,
   SquareTerminal
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 export const TOOL_ICON_MAP = {
   ask_user_question: HelpCircle,
@@ -40,6 +41,7 @@ export const TOOL_ICON_MAP = {
   present_artifacts: FolderOutput,
   query_kb: BookOpen,
   read_file: FileText,
+  remember_memory: Brain,
   replace: FilePen,
   run_shell_command: SquareTerminal,
   search_file: FolderSearch,
@@ -50,16 +52,67 @@ export const TOOL_ICON_MAP = {
   subagent_start: Bot,
   subagent_status: RefreshCw,
   task: Bot,
+  web_search: Globe,
   tavily_search: Globe,
+  doubao_search: Globe,
   text_to_img_qwen_image: Image,
   write_file: FileEdit,
   write_todos: CheckSquare
+}
+
+// 前端兜底的工具显示名称：仅用于工具列表（availableTools）无法映射到 display name 的工具，
+// 例如 FilesystemMiddleware / TodoListMiddleware 等 middleware 注入的工具。
+// 内置工具与知识库工具的 display_name 由后端定义（@tool 装饰器），通过工具列表下发。
+export const TOOL_NAME_MAP = {
+  bash: '执行命令',
+  cmd: '执行命令',
+  execute: '执行命令',
+  run_shell_command: '执行命令',
+  ls: '列出目录',
+  list_directory: '列出目录',
+  glob: '匹配文件路径',
+  grep: '搜索文件内容',
+  read_file: '读取文件',
+  remember_memory: '更新记忆',
+  write_file: '写入文件',
+  edit_file: '编辑文件',
+  replace: '编辑文件',
+  search_file: '搜索知识库文件',
+  search_file_content: '搜索文件内容',
+  write_todos: '更新任务清单',
+  task: '调用子智能体',
+  subagent_start: '启动子智能体',
+  subagent_status: '查询子智能体',
+  subagent_events: '查看子智能体事件',
+  subagent_cancel: '取消子智能体',
+  subagent_await: '等待子智能体',
+  text_to_img_qwen_image: '生成图片',
+  query_kb: '搜索知识库',
+  list_kbs: '查看知识库列表',
+  find_kb_document: '查找知识库文档',
+  open_kb_document: '打开知识库文档',
+  get_mindmap: '获取思维导图',
+  calculator: '计算器',
+  web_search: '网络搜索',
+  tavily_search: '网络搜索',
+  doubao_search: '网络搜索',
+  ocr_parse_file: 'OCR识别文件',
+  mysql_list_tables: '列出数据库表',
+  mysql_describe_table: '查看表结构',
+  mysql_query: '执行SQL查询',
+  ask_user_question: '向用户提问'
 }
 
 // Keep intentionally hidden tool calls centralized so group summaries and renderers stay consistent.
 export const HIDDEN_TOOL_CALL_IDS = ['present_artifacts']
 
 export const getToolCallId = (toolCall) => toolCall?.name || toolCall?.function?.name || ''
+
+export const getToolName = (toolId) => TOOL_NAME_MAP[toolId] || toolId
+
+// 从工具元数据列表（完整工具列表或 buildin options）中按工具 id 查找对应元数据
+export const findToolInList = (toolId, toolsList) =>
+  (toolsList || []).find((t) => (t.slug ?? t.key ?? t.id) === toolId)
 
 export const isHiddenToolCall = (toolCall) => HIDDEN_TOOL_CALL_IDS.includes(getToolCallId(toolCall))
 

@@ -16,6 +16,44 @@
       @success="onFileUploadSuccess"
     />
 
+    <FileSearchModal
+      v-model:open="fileSearchModalVisible"
+      :kb-id="kbId"
+      @select="onFileSearchSelect"
+    />
+
+    <a-modal v-model:open="virtualFolderModalVisible" title="转换历史虚拟文件夹">
+      <p>该知识库存在历史兼容数据创建的虚拟文件夹，需要转换为真实目录结构。</p>
+      <p>
+        转换按批次提交；关闭弹窗或进度连接中断不会撤销已经完成的部分，再次执行会从剩余数据继续。
+      </p>
+      <a-progress
+        v-if="virtualFolderTask"
+        :percent="Math.round(virtualFolderTask.progress || 0)"
+        :status="
+          virtualFolderTask.status === 'failed'
+            ? 'exception'
+            : virtualFolderTask.status === 'success'
+              ? 'success'
+              : 'active'
+        "
+      />
+      <p v-if="virtualFolderTask?.message" class="virtual-folder-migration-message">
+        {{ virtualFolderTask.message }}
+      </p>
+      <template #footer>
+        <a-button @click="virtualFolderModalVisible = false">关闭</a-button>
+        <a-button
+          type="primary"
+          :loading="virtualFolderStarting"
+          :disabled="virtualFolderRunning"
+          @click="startVirtualFolderMigration"
+        >
+          开始转换
+        </a-button>
+      </template>
+    </a-modal>
+
     <div v-if="detailLoading" class="database-detail-loading">
       <a-spin tip="加载知识库信息..." />
     </div>
@@ -46,12 +84,13 @@
               <span>复制 ID</span>
             </button>
             <button
+              v-if="canManageDatabase"
               type="button"
               class="lucide-icon-btn extension-panel-action extension-panel-action-primary"
               @click="showEditModal"
             >
               <Pencil :size="14" />
-              <span>编辑</span>
+              <span>配置</span>
             </button>
           </a-space>
         </div>
@@ -81,68 +120,109 @@
             <div class="file-management-info">
               <div class="file-info-title">
                 <div class="file-info-title-row">
-                  <button
-                    type="button"
-                    class="lucide-icon-btn extension-panel-action extension-panel-action-primary"
-                    @click="showAddFilesModal()"
+                  <div
+                    v-if="canManageDatabase"
+                    ref="uploadActionMenuRef"
+                    class="file-action-dropdown"
                   >
-                    <FileUp :size="14" />
-                    <span>上传</span>
-                  </button>
-                  <button
-                    type="button"
-                    class="lucide-icon-btn extension-panel-action extension-panel-action-secondary"
-                    @click="showCreateFolderModal"
-                  >
-                    <FolderPlus :size="14" />
-                    <span>新建文件夹</span>
-                  </button>
+                    <button
+                      type="button"
+                      class="lucide-icon-btn extension-panel-action extension-panel-action-primary"
+                      @click="uploadActionMenuOpen = !uploadActionMenuOpen"
+                    >
+                      <Upload :size="14" />
+                      <span>上传</span>
+                      <ChevronDown
+                        :size="12"
+                        class="file-action-chevron"
+                        :class="{ 'is-open': uploadActionMenuOpen }"
+                      />
+                    </button>
+                    <Transition name="file-action-menu">
+                      <div v-if="uploadActionMenuOpen" class="file-action-menu">
+                        <button type="button" class="file-action-menu-item" @click="onUploadAction">
+                          <Upload :size="14" />
+                          <span>上传文件</span>
+                        </button>
+                        <button
+                          type="button"
+                          class="file-action-menu-item"
+                          @click="onUploadFolderAction"
+                        >
+                          <FolderUp :size="14" />
+                          <span>上传文件夹</span>
+                        </button>
+                        <button
+                          type="button"
+                          class="file-action-menu-item"
+                          @click="onCreateFolderAction"
+                        >
+                          <FolderPlus :size="14" />
+                          <span>新建文件夹</span>
+                        </button>
+                      </div>
+                    </Transition>
+                  </div>
                 </div>
               </div>
               <div class="file-panel-status">
                 <button
-                  v-if="pendingParseCount > 0"
+                  v-if="canManageDatabase && pendingParseCount > 0"
                   type="button"
-                  class="file-stat-card file-stat-action file-stat-summary"
+                  class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-warning file-stat-summary"
                   :disabled="store.state.chunkLoading"
                   @click="confirmBatchParse"
                 >
                   <FileText :size="16" />
                   <div class="file-stat-inline">
-                    <strong>{{ pendingParseCount }}</strong>
-                    <span>待解析</span>
+                    <span class="file-stat-value">{{ pendingParseCount }}</span>
+                    <span class="file-stat-label">待解析</span>
                   </div>
                 </button>
                 <button
-                  v-if="pendingIndexCount > 0"
+                  v-if="canManageDatabase && pendingIndexCount > 0"
                   type="button"
-                  class="file-stat-card file-stat-action file-stat-summary"
+                  class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-warning file-stat-summary"
                   :disabled="store.state.chunkLoading"
                   @click="confirmBatchIndex"
                 >
                   <DatabaseIcon :size="16" />
                   <div class="file-stat-inline">
-                    <strong>{{ pendingIndexCount }}</strong>
-                    <span>待入库</span>
+                    <span class="file-stat-value">{{ pendingIndexCount }}</span>
+                    <span class="file-stat-label">待入库</span>
                   </div>
                 </button>
-                <div class="file-stat-card file-stat-summary">
-                  <FileText :size="16" />
+                <button
+                  type="button"
+                  class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-summary"
+                  :class="{ 'file-stat-warning': virtualFolderStatus.has_virtual_folders }"
+                  :disabled="!virtualFolderStatus.has_virtual_folders || !canManageDatabase"
+                  :title="
+                    virtualFolderStatus.has_virtual_folders ? '存在历史虚拟文件夹，点击转换' : ''
+                  "
+                  @click="virtualFolderModalVisible = true"
+                >
+                  <CircleAlert v-if="virtualFolderStatus.has_virtual_folders" :size="16" />
+                  <FileText v-else :size="16" />
                   <div class="file-stat-inline">
-                    <strong>{{ fileStats.count }}</strong>
-                    <span>文件</span>
+                    <span class="file-stat-value">{{ fileStats.count }}</span>
+                    <span class="file-stat-label">文件</span>
                   </div>
-                </div>
-                <div v-if="fileStats.sizeText" class="file-stat-card file-stat-summary">
-                  <DatabaseIcon :size="16" />
+                </button>
+                <div
+                  v-if="fileStats.sizeText"
+                  class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-summary"
+                  :title="`文件大小 ${fileStats.sizeText}`"
+                >
+                  <DatabaseIcon :size="16" aria-hidden="true" />
                   <div class="file-stat-inline">
-                    <strong>{{ fileStats.sizeText }}</strong>
-                    <span>总大小</span>
+                    <span class="file-stat-value">{{ fileStats.sizeText }}</span>
                   </div>
                 </div>
                 <button
+                  v-if="canManageDatabase"
                   type="button"
-                  class="file-stat-card file-stat-summary file-stat-repair"
+                  class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-summary file-stat-repair"
                   :disabled="statsRepairing"
                   :aria-busy="statsRepairing"
                   aria-label="修复缺失的 Chunk/Token 统计"
@@ -152,13 +232,14 @@
                   <LoaderCircle v-if="statsRepairing" :size="16" class="file-stat-spinner" />
                   <DatabaseIcon v-else :size="16" />
                   <div class="file-stat-inline">
-                    <strong>{{ fileStats.chunkText }}</strong>
-                    <span>Chunks</span>
+                    <span class="file-stat-value">{{ fileStats.chunkText }}</span>
+                    <span class="file-stat-label">Chunks</span>
                   </div>
                 </button>
                 <button
+                  v-if="canManageDatabase"
                   type="button"
-                  class="file-stat-card file-stat-summary file-stat-repair"
+                  class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-summary file-stat-repair"
                   :disabled="statsRepairing"
                   :aria-busy="statsRepairing"
                   aria-label="修复缺失的 Chunk/Token 统计"
@@ -168,59 +249,39 @@
                   <LoaderCircle v-if="statsRepairing" :size="16" class="file-stat-spinner" />
                   <Hash v-else :size="16" />
                   <div class="file-stat-inline">
-                    <strong>{{ fileStats.tokenText }}</strong>
-                    <span>Tokens</span>
+                    <span class="file-stat-value">{{ fileStats.tokenText }}</span>
+                    <span class="file-stat-label">Tokens</span>
                   </div>
                 </button>
               </div>
             </div>
-            <FileTable ref="fileTableRef" />
+            <FileTable
+              ref="fileTableRef"
+              :readonly="!canManageDatabase"
+              @search="fileSearchModalVisible = true"
+            />
           </div>
 
           <div v-show="activeTab === 'query'" class="tab-panel query-config-panel">
-            <div class="query-config-layout">
-              <div class="query-test-pane">
-                <QuerySection ref="querySectionRef" :visible="true" @toggle-visible="() => {}" />
-              </div>
-              <aside class="query-config-pane" aria-label="检索配置">
-                <div class="search-config-wrapper">
-                  <div class="search-config-header">
-                    <div>
-                      <h3>检索配置</h3>
-                      <p>调整当前知识库的检索参数。</p>
-                    </div>
-                    <button
-                      type="button"
-                      class="lucide-icon-btn extension-panel-action extension-panel-action-primary"
-                      :disabled="searchConfigSaving"
-                      @click="handleInlineSearchConfigSave"
-                    >
-                      <Save :size="14" />
-                      <span>保存</span>
-                    </button>
-                  </div>
-                  <div class="search-config-body">
-                    <SearchConfigPanel
-                      ref="searchConfigPanelRef"
-                      :kb-id="kbId"
-                      @save="handleSearchConfigSave"
-                    />
-                  </div>
-                </div>
-              </aside>
-            </div>
+            <QuerySection ref="querySectionRef" :visible="true" @toggle-visible="() => {}" />
           </div>
 
           <div v-if="isMilvus && activeTab === 'graph'" class="tab-panel">
             <KnowledgeGraphSection
               :visible="true"
               :active="activeTab === 'graph'"
+              :readonly="!canManageDatabase"
               @toggle-visible="() => {}"
             />
           </div>
 
           <div v-if="isMilvus && activeTab === 'mindmap'" class="tab-panel">
-            <MindMapSection v-if="kbId" :kb-id="kbId" ref="mindmapSectionRef" />
+            <MindMapSection
+              v-if="kbId"
+              :kb-id="kbId"
+              :readonly="!canManageDatabase"
+              ref="mindmapSectionRef"
+            />
           </div>
 
           <div v-if="isMilvus && activeTab === 'evaluation'" class="tab-panel">
@@ -246,153 +307,169 @@
       </div>
     </template>
 
-    <a-modal v-model:open="editModalVisible" title="编辑知识库信息" width="700px">
+    <a-modal
+      v-model:open="editModalVisible"
+      title="配置知识库"
+      width="720px"
+      :mask-closable="false"
+      wrap-class-name="database-edit-modal"
+    >
       <template #footer>
-        <a-button danger @click="deleteDatabase" style="margin-right: auto; margin-left: 0">
-          <template #icon>
-            <Trash2 :size="16" style="vertical-align: -3px; margin-right: 4px" />
-          </template>
-          删除数据库
+        <a-button key="close" @click="editModalVisible = false">关闭</a-button>
+        <a-button key="submit" type="primary" :loading="editSaving" @click="handleEditSubmit">
+          保存
         </a-button>
-        <a-button key="back" @click="editModalVisible = false">取消</a-button>
-        <a-button key="submit" type="primary" @click="handleEditSubmit">确定</a-button>
       </template>
       <a-form :model="editForm" :rules="rules" ref="editFormRef" layout="vertical">
-        <a-form-item label="知识库名称" name="name" required>
-          <a-input v-model:value="editForm.name" placeholder="请输入知识库名称" />
-        </a-form-item>
-        <a-form-item label="知识库描述" name="description">
-          <AiTextarea
-            v-model="editForm.description"
-            :name="editForm.name"
-            :files="fileList"
-            placeholder="请输入知识库描述"
-            action-placement="header"
-            :rows="4"
-          />
-        </a-form-item>
+        <a-tabs v-model:active-key="editModalTab" class="database-edit-tabs">
+          <a-tab-pane key="basic" tab="基础信息">
+            <div class="database-edit-tab-content">
+              <a-form-item label="知识库名称" name="name" required>
+                <a-input v-model:value="editForm.name" placeholder="请输入知识库名称" />
+              </a-form-item>
+              <a-form-item label="知识库描述" name="description">
+                <AiTextarea
+                  v-model="editForm.description"
+                  :name="editForm.name"
+                  :files="fileList"
+                  placeholder="请输入知识库描述"
+                  action-placement="header"
+                  :rows="4"
+                />
+              </a-form-item>
 
-        <a-form-item v-if="!isConnector" label="自动生成问题" name="auto_generate_questions">
-          <a-switch
-            v-model:checked="editForm.auto_generate_questions"
-            checked-children="开启"
-            un-checked-children="关闭"
-          />
-          <span style="margin-left: 8px; font-size: 12px; color: var(--gray-500)">
-            上传文件后自动生成测试问题
-          </span>
-        </a-form-item>
+              <a-form-item v-if="database?.embedding_model_spec" label="Embedding 模型">
+                <div class="readonly-model-field">
+                  <span class="readonly-model-value" :title="database.embedding_model_spec">
+                    {{ database.embedding_model_spec }}
+                  </span>
+                  <span class="readonly-model-hint">创建后不可修改</span>
+                </div>
+              </a-form-item>
 
-        <a-form-item v-if="!isConnector" name="chunk_preset_id">
-          <template #label>
-            <span class="chunk-preset-label">
-              分块策略
-              <a-tooltip :title="editPresetDescription">
-                <QuestionCircleOutlined class="chunk-preset-help-icon" />
-              </a-tooltip>
-            </span>
-          </template>
-          <a-select
-            v-model:value="editForm.chunk_preset_id"
-            :options="chunkPresetOptions"
-            :loading="chunkPresetLoading"
-          />
-        </a-form-item>
+              <a-form-item v-if="!isConnector" name="chunk_preset_id">
+                <template #label>
+                  <span class="chunk-preset-label">
+                    分块策略
+                    <a-tooltip :title="editPresetDescription">
+                      <QuestionCircleOutlined class="chunk-preset-help-icon" />
+                    </a-tooltip>
+                  </span>
+                </template>
+                <a-select
+                  v-model:value="editForm.chunk_preset_id"
+                  :options="chunkPresetOptions"
+                  :loading="chunkPresetLoading"
+                />
+              </a-form-item>
+              <template v-if="isDifyKb">
+                <a-form-item label="Dify API URL" name="dify_api_url">
+                  <a-input
+                    v-model:value="editForm.dify_api_url"
+                    placeholder="例如: https://api.dify.ai/v1"
+                  />
+                </a-form-item>
+                <a-form-item label="Dify Token" name="dify_token">
+                  <a-input-password
+                    v-model:value="editForm.dify_token"
+                    placeholder="请输入 Dify API Token"
+                  />
+                </a-form-item>
+                <a-form-item label="Dataset ID" name="dify_dataset_id">
+                  <a-input
+                    v-model:value="editForm.dify_dataset_id"
+                    placeholder="请输入 Dify dataset_id"
+                  />
+                </a-form-item>
+              </template>
 
-        <template v-if="isDifyKb">
-          <a-form-item label="Dify API URL" name="dify_api_url">
-            <a-input
-              v-model:value="editForm.dify_api_url"
-              placeholder="例如: https://api.dify.ai/v1"
-            />
-          </a-form-item>
-          <a-form-item label="Dify Token" name="dify_token">
-            <a-input-password
-              v-model:value="editForm.dify_token"
-              placeholder="请输入 Dify API Token"
-            />
-          </a-form-item>
-          <a-form-item label="Dataset ID" name="dify_dataset_id">
-            <a-input
-              v-model:value="editForm.dify_dataset_id"
-              placeholder="请输入 Dify dataset_id"
-            />
-          </a-form-item>
-        </template>
+              <template v-if="isNotionKb">
+                <a-form-item label="Notion Token" name="notion_token">
+                  <a-input-password
+                    v-model:value="editForm.notion_token"
+                    placeholder="留空则保持现有 Token 或使用环境变量"
+                  />
+                </a-form-item>
+                <a-form-item label="Data Source ID" name="notion_data_source_id">
+                  <a-input
+                    v-model:value="editForm.notion_data_source_id"
+                    placeholder="请输入 Notion data_source_id"
+                  />
+                </a-form-item>
+                <a-form-item label="Notion API Version" name="notion_version">
+                  <a-input v-model:value="editForm.notion_version" placeholder="2026-03-11" />
+                </a-form-item>
+              </template>
+            </div>
+          </a-tab-pane>
 
-        <template v-if="isNotionKb">
-          <a-form-item label="Notion Token" name="notion_token">
-            <a-input-password
-              v-model:value="editForm.notion_token"
-              placeholder="留空则保持现有 Token 或使用环境变量"
-            />
-          </a-form-item>
-          <a-form-item label="Data Source ID" name="notion_data_source_id">
-            <a-input
-              v-model:value="editForm.notion_data_source_id"
-              placeholder="请输入 Notion data_source_id"
-            />
-          </a-form-item>
-          <a-form-item label="Notion API Version" name="notion_version">
-            <a-input v-model:value="editForm.notion_version" placeholder="2026-03-11" />
-          </a-form-item>
-        </template>
+          <a-tab-pane key="permission" tab="权限配置">
+            <div class="database-edit-tab-content">
+              <a-form-item v-if="canEditShareConfig" name="share_config">
+                <a-form-item-rest>
+                  <ShareConfigForm
+                    ref="shareConfigFormRef"
+                    v-model="editShareConfig"
+                    :auto-select-user-dept="true"
+                    :require-read-scope="true"
+                  >
+                    <template #manage-description>
+                      知识库<strong>仅管理员</strong>可以管理知识库；普通用户无法管理。
+                    </template>
+                  </ShareConfigForm>
+                </a-form-item-rest>
+              </a-form-item>
+              <div v-else-if="database.share_config" class="share-config-readonly">
+                <a-tag :color="shareConfigDisplay.color">{{ shareConfigDisplay.label }}</a-tag>
+                <span class="access-names">{{ shareConfigDisplay.detail }}</span>
+              </div>
+            </div>
+          </a-tab-pane>
 
-        <a-form-item v-if="canEditShareConfig" label="共享设置" name="share_config">
-          <a-form-item-rest>
-            <ShareConfigForm
-              ref="shareConfigFormRef"
-              :model-value="database.share_config"
-              :auto-select-user-dept="true"
-            />
-          </a-form-item-rest>
-        </a-form-item>
-        <a-form-item
-          v-else-if="database.share_config"
-          label="共享设置"
-          name="share_config_readonly"
-        >
-          <div class="share-config-readonly">
-            <a-tag :color="shareConfigDisplay.color">
-              {{ shareConfigDisplay.label }}
-            </a-tag>
-            <span class="access-names">{{ shareConfigDisplay.detail }}</span>
-          </div>
-        </a-form-item>
+          <a-tab-pane key="retrieval" tab="检索配置" force-render>
+            <div class="database-edit-tab-content retrieval-config-content">
+              <p class="database-edit-tab-description">
+                调整当前知识库在检索测试和 Agent 使用时采用的参数。
+              </p>
+              <SearchConfigPanel v-if="editModalVisible" ref="searchConfigPanelRef" :kb-id="kbId" />
+            </div>
+          </a-tab-pane>
+        </a-tabs>
       </a-form>
     </a-modal>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDatabaseStore } from '@/stores/database'
 import { useTaskerStore } from '@/stores/tasker'
-import { useUserStore } from '@/stores/user'
 import {
   ArrowLeft,
   BarChart3,
   ClipboardList,
+  ChevronDown,
+  CircleAlert,
   Copy,
   Database as DatabaseIcon,
-  FileUp,
   FileText,
   FolderPlus,
+  FolderUp,
   Hash,
   LoaderCircle,
   Map as MapIcon,
   Network,
   Pencil,
-  Save,
   Search,
-  Trash2
-} from 'lucide-vue-next'
+  Upload
+} from '@lucide/vue'
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
-import { message, Modal } from 'ant-design-vue'
+import { message } from 'ant-design-vue'
 import FileTable from '@/components/FileTable.vue'
 import FileDetailModal from '@/components/FileDetailModal.vue'
 import FileUploadModal from '@/components/FileUploadModal.vue'
+import FileSearchModal from '@/components/modals/FileSearchModal.vue'
 import KnowledgeGraphSection from '@/components/KnowledgeGraphSection.vue'
 import QuerySection from '@/components/QuerySection.vue'
 import MindMapSection from '@/components/MindMapSection.vue'
@@ -406,14 +483,12 @@ import { departmentApi } from '@/apis/department_api'
 import { authApi } from '@/apis/auth_api'
 import { useChunkPresetOptions } from '@/composables/useChunkPresetOptions'
 import { DEFAULT_CHUNK_PRESET_ID } from '@/utils/chunkUtils'
-import { formatFileSize } from '@/utils/file_utils'
 import { getKbTypeIcon, getKbTypeLabel, kbUtils } from '@/utils/kb_utils'
 
 const route = useRoute()
 const router = useRouter()
 const store = useDatabaseStore()
 const taskerStore = useTaskerStore()
-const userStore = useUserStore()
 const {
   chunkPresetSelectOptions: chunkPresetOptions,
   chunkPresetLoading,
@@ -423,6 +498,7 @@ const {
 
 const kbId = computed(() => store.kbId)
 const database = computed(() => store.database)
+const canManageDatabase = computed(() => database.value?.can_manage === true)
 const isCurrentDatabaseLoaded = computed(() => database.value?.kb_id === kbId.value)
 const kbType = computed(() =>
   isCurrentDatabaseLoaded.value ? database.value.kb_type?.toLowerCase() || 'milvus' : ''
@@ -462,7 +538,11 @@ const tabs = computed(() => {
   return [{ key: 'query', label: '检索测试', icon: Search }]
 })
 
-const visibleTabs = computed(() => tabs.value)
+const visibleTabs = computed(() =>
+  canManageDatabase.value
+    ? tabs.value
+    : tabs.value.filter((tab) => ['filetable', 'query', 'graph', 'mindmap'].includes(tab.key))
+)
 const activeTab = ref('filetable')
 
 watch(
@@ -489,6 +569,22 @@ const formatStatNumber = (value) => {
   return Number.isFinite(number) ? number.toLocaleString('zh-CN') : '0'
 }
 
+const formatCompactFileSize = (bytes) => {
+  const number = Number(bytes)
+  if (!Number.isFinite(number) || number <= 0) return ''
+
+  const units = ['b', 'kb', 'mb', 'gb', 'tb', 'pb']
+  let unitIndex = 0
+  let value = number
+  while (value >= 1000 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+
+  const decimals = value >= 100 ? 0 : value >= 10 ? 1 : 2
+  return `${Number(value.toFixed(decimals))}${units[unitIndex]}`
+}
+
 const formatTokenStatNumber = (value) => {
   const number = Number(value ?? 0)
   if (!Number.isFinite(number)) return '0'
@@ -499,6 +595,14 @@ const formatTokenStatNumber = (value) => {
 }
 
 const statsRepairing = ref(false)
+const virtualFolderStatus = ref({ has_virtual_folders: false, file_count: 0, remaining_steps: 0 })
+const virtualFolderModalVisible = ref(false)
+const virtualFolderStarting = ref(false)
+const virtualFolderTask = ref(null)
+const virtualFolderStreamController = ref(null)
+const virtualFolderRunning = computed(() =>
+  ['pending', 'running'].includes(virtualFolderTask.value?.status)
+)
 
 const fileStats = computed(() => {
   const stats = store.database.stats || {}
@@ -507,11 +611,72 @@ const fileStats = computed(() => {
 
   return {
     count: Number.isFinite(statsFileCount) ? statsFileCount : 0,
-    sizeText: totalSize > 0 ? formatFileSize(totalSize) : '',
+    sizeText: totalSize > 0 ? formatCompactFileSize(totalSize) : '',
     chunkText: formatStatNumber(stats.chunk_count),
     tokenText: formatTokenStatNumber(stats.token_count)
   }
 })
+
+const detectVirtualFolders = async () => {
+  if (!kbId.value || !canManageDatabase.value) return
+  try {
+    virtualFolderStatus.value = await databaseApi.detectVirtualFolders(kbId.value)
+  } catch (error) {
+    console.error(error)
+  }
+}
+
+const consumeVirtualFolderEvents = async (taskId) => {
+  virtualFolderStreamController.value?.abort()
+  const controller = new AbortController()
+  virtualFolderStreamController.value = controller
+  try {
+    const response = await databaseApi.streamVirtualFolderMigration(
+      kbId.value,
+      taskId,
+      controller.signal
+    )
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const events = buffer.split('\n\n')
+      buffer = events.pop() || ''
+      for (const event of events) {
+        const data = event
+          .split('\n')
+          .find((line) => line.startsWith('data: '))
+          ?.slice(6)
+        if (data) virtualFolderTask.value = JSON.parse(data)
+      }
+    }
+    await detectVirtualFolders()
+    await store.getDatabaseInfo(undefined, true, true)
+  } catch (error) {
+    if (error.name !== 'AbortError') {
+      console.error(error)
+      message.warning('进度连接已中断，转换任务会继续执行')
+    }
+  }
+}
+
+const startVirtualFolderMigration = async () => {
+  if (!kbId.value || virtualFolderStarting.value || virtualFolderRunning.value) return
+  virtualFolderStarting.value = true
+  try {
+    const result = await databaseApi.startVirtualFolderMigration(kbId.value)
+    virtualFolderTask.value = { status: 'pending', progress: 0, message: '等待任务执行' }
+    consumeVirtualFolderEvents(result.task_id)
+  } catch (error) {
+    console.error(error)
+    message.error(error.message || '启动转换失败')
+  } finally {
+    virtualFolderStarting.value = false
+  }
+}
 
 const repairDatabaseStats = async () => {
   if (!kbId.value || statsRepairing.value) return
@@ -549,13 +714,10 @@ const confirmBatchParse = () => {
     return
   }
 
-  Modal.confirm({
-    title: '解析待解析文件',
-    content: `将提交 ${formatStatNumber(count)} 个待解析文件，任务会在后台按批处理，可在任务中心查看进度。`,
-    okText: '提交解析',
-    cancelText: '取消',
-    onOk: () => store.parsePendingFiles(count)
-  })
+  const opened = fileTableRef.value?.startPendingParse?.(count)
+  if (!opened) {
+    message.error('文件列表尚未加载完成，请稍后再试')
+  }
 }
 
 const confirmBatchIndex = () => {
@@ -573,24 +735,16 @@ const confirmBatchIndex = () => {
 
 const mindmapSectionRef = ref(null)
 const querySectionRef = ref(null)
-const searchConfigSaving = ref(false)
 const searchConfigPanelRef = ref(null)
 
-const handleSearchConfigSave = () => {
-  store.getDatabaseInfo()
-}
+const addFilesModalVisible = ref(false)
+const fileSearchModalVisible = ref(false)
 
-const handleInlineSearchConfigSave = async () => {
-  if (!searchConfigPanelRef.value) return
-  searchConfigSaving.value = true
-  try {
-    await searchConfigPanelRef.value.save()
-  } finally {
-    searchConfigSaving.value = false
+const onFileSearchSelect = (file) => {
+  if (file?.file_id) {
+    store.openFileDetail(file.file_id)
   }
 }
-
-const addFilesModalVisible = ref(false)
 const currentFolderId = ref(null)
 const isFolderUploadMode = ref(false)
 const addFilesMode = ref('file')
@@ -609,6 +763,30 @@ const showAddFilesModal = (options = {}) => {
 
 const showCreateFolderModal = () => {
   fileTableRef.value?.showCreateFolderModal()
+}
+
+const uploadActionMenuRef = ref(null)
+const uploadActionMenuOpen = ref(false)
+
+const onUploadAction = () => {
+  uploadActionMenuOpen.value = false
+  showAddFilesModal()
+}
+
+const onUploadFolderAction = () => {
+  uploadActionMenuOpen.value = false
+  showAddFilesModal({ isFolder: true, mode: 'folder' })
+}
+
+const onCreateFolderAction = () => {
+  uploadActionMenuOpen.value = false
+  showCreateFolderModal()
+}
+
+const onUploadMenuOutsideClick = (event) => {
+  if (uploadActionMenuRef.value && !uploadActionMenuRef.value.contains(event.target)) {
+    uploadActionMenuOpen.value = false
+  }
 }
 
 const folderTree = computed(() => {
@@ -642,6 +820,9 @@ const resetFileSelectionState = () => {
 watch(
   () => route.params.kbId,
   async (nextKbId) => {
+    virtualFolderStreamController.value?.abort()
+    virtualFolderTask.value = null
+    virtualFolderStatus.value = { has_virtual_folders: false, file_count: 0, remaining_steps: 0 }
     isInitialLoad.value = true
     detailLoading.value = true
     store.kbId = nextKbId
@@ -649,6 +830,7 @@ watch(
     store.stopAutoRefresh()
     try {
       await store.getDatabaseInfo(nextKbId, false)
+      await detectVirtualFolders()
       store.startAutoRefresh()
     } finally {
       detailLoading.value = false
@@ -672,7 +854,7 @@ watch(
     }
 
     if (newFileCount !== oldFileCount) {
-      if (newFileCount > 0) {
+      if (newFileCount > 0 && canManageDatabase.value) {
         setTimeout(async () => {
           if (querySectionRef.value) {
             if (database.value.additional_params?.auto_generate_questions) {
@@ -728,12 +910,18 @@ const copyDatabaseId = async () => {
 const departments = ref([])
 const users = ref([])
 const editModalVisible = ref(false)
+const editModalTab = ref('basic')
+const editSaving = ref(false)
 const editFormRef = ref(null)
 const shareConfigFormRef = ref(null)
+const editShareConfig = ref({
+  version: 2,
+  read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+  manage_scope: null
+})
 const editForm = reactive({
   name: '',
   description: '',
-  auto_generate_questions: false,
   chunk_preset_id: DEFAULT_CHUNK_PRESET_ID,
   dify_api_url: '',
   dify_token: '',
@@ -752,34 +940,34 @@ const fileList = computed(() => {
   return (store.documentFiles || []).map((f) => f.filename).filter(Boolean)
 })
 
-const canEditShareConfig = computed(() => userStore.isSuperAdmin || userStore.isAdmin)
+const canEditShareConfig = computed(() => canManageDatabase.value)
 
 const shareConfigDisplay = computed(() => {
-  const shareConfig = database.value?.share_config || { access_level: 'global' }
-  if (shareConfig.access_level === 'department') {
-    const departmentIds = shareConfig.department_ids || []
-    const names = departmentIds.map((id) => getDepartmentName(id)).join('、') || '无'
+  const shareConfig = database.value?.share_config || {}
+  const readScope = shareConfig.version === 2 ? shareConfig.read_scope : shareConfig
+  const manageScope = shareConfig.manage_scope
+  const describeScope = (scope) => {
+    if (!scope) return '无'
+    if (scope.access_level === 'global') return '全局'
+    if (scope.access_level === 'department') {
+      const names =
+        (scope.department_ids || []).map((id) => getDepartmentName(id)).join('、') || '无'
+      return `${scope.department_ids?.length || 0} 个部门：${names}`
+    }
+    const names = (scope.user_uids || []).map((uid) => getUserName(uid)).join('、') || '无'
+    return `${scope.user_uids?.length || 0} 个用户：${names}`
+  }
+  if (manageScope) {
     return {
       color: 'blue',
-      label: '部门共享',
-      detail: `${departmentIds.length} 个部门可访问：${names}`
+      label: '分级共享',
+      detail: `读取：${describeScope(readScope)}；管理：${describeScope(manageScope)}`
     }
   }
-
-  if (shareConfig.access_level === 'user') {
-    const userUids = shareConfig.user_uids || []
-    const names = userUids.map((uid) => getUserName(uid)).join('、') || '无'
-    return {
-      color: 'purple',
-      label: '指定人',
-      detail: `${userUids.length} 个用户可访问：${names}`
-    }
-  }
-
   return {
     color: 'green',
-    label: '全局共享',
-    detail: '所有用户可访问'
+    label: readScope?.access_level === 'global' ? '全局只读' : '共享只读',
+    detail: `读取：${describeScope(readScope)}`
   }
 })
 
@@ -811,10 +999,9 @@ const loadUsers = async () => {
 }
 
 const showEditModal = () => {
+  editModalTab.value = 'basic'
   editForm.name = database.value.name || ''
   editForm.description = database.value.description || ''
-  editForm.auto_generate_questions =
-    database.value.additional_params?.auto_generate_questions || false
   editForm.chunk_preset_id =
     database.value.additional_params?.chunk_preset_id || DEFAULT_CHUNK_PRESET_ID
   editForm.dify_api_url = database.value.additional_params?.dify_api_url || ''
@@ -823,6 +1010,11 @@ const showEditModal = () => {
   editForm.notion_token = ''
   editForm.notion_data_source_id = database.value.additional_params?.notion_data_source_id || ''
   editForm.notion_version = database.value.additional_params?.notion_version || '2026-03-11'
+  editShareConfig.value = database.value.share_config || {
+    version: 2,
+    read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+    manage_scope: null
+  }
   editModalVisible.value = true
 }
 
@@ -836,84 +1028,94 @@ watch(
   { immediate: true }
 )
 
-const handleEditSubmit = () => {
-  editFormRef.value
-    .validate()
-    .then(async () => {
-      if (shareConfigFormRef.value) {
-        const validation = shareConfigFormRef.value.validate()
-        if (!validation.valid) {
-          message.warning(validation.message)
-          return
-        }
+const handleEditSubmit = async () => {
+  editSaving.value = true
+  try {
+    await editFormRef.value.validate()
+
+    if (shareConfigFormRef.value) {
+      const validation = shareConfigFormRef.value.validate()
+      if (!validation.valid) {
+        editModalTab.value = 'permission'
+        message.warning(validation.message)
+        return
       }
+    }
 
-      const formConfig = shareConfigFormRef.value?.config || { access_level: 'global' }
-      const updateData = {
-        name: editForm.name,
-        description: editForm.description,
-        additional_params: {},
-        share_config: {
-          access_level: formConfig.access_level,
-          department_ids:
-            formConfig.access_level === 'department' ? formConfig.department_ids || [] : [],
-          user_uids: formConfig.access_level === 'user' ? formConfig.user_uids || [] : []
-        }
+    const updateData = {
+      name: editForm.name,
+      description: editForm.description,
+      additional_params: {},
+      share_config: editShareConfig.value
+    }
+
+    if (isDifyKb.value) {
+      if (
+        !editForm.dify_api_url?.trim() ||
+        !editForm.dify_token?.trim() ||
+        !editForm.dify_dataset_id?.trim()
+      ) {
+        editModalTab.value = 'basic'
+        message.error('请完整填写 Dify API URL、Token 和 Dataset ID')
+        return
       }
-
-      if (isDifyKb.value) {
-        if (
-          !editForm.dify_api_url?.trim() ||
-          !editForm.dify_token?.trim() ||
-          !editForm.dify_dataset_id?.trim()
-        ) {
-          message.error('请完整填写 Dify API URL、Token 和 Dataset ID')
-          return
-        }
-        if (!editForm.dify_api_url.trim().endsWith('/v1')) {
-          message.error('Dify API URL 必须以 /v1 结尾')
-          return
-        }
-        updateData.additional_params = {
-          dify_api_url: editForm.dify_api_url.trim(),
-          dify_token: editForm.dify_token.trim(),
-          dify_dataset_id: editForm.dify_dataset_id.trim()
-        }
-      } else if (isNotionKb.value) {
-        if (!editForm.notion_data_source_id?.trim()) {
-          message.error('请填写 Notion Data Source ID')
-          return
-        }
-        updateData.additional_params = {
-          notion_data_source_id: editForm.notion_data_source_id.trim(),
-          notion_version: editForm.notion_version?.trim() || '2026-03-11'
-        }
-        if (editForm.notion_token?.trim()) {
-          updateData.additional_params.notion_token = editForm.notion_token.trim()
-        }
-      } else {
-        updateData.additional_params = {
-          auto_generate_questions: editForm.auto_generate_questions,
-          chunk_preset_id: editForm.chunk_preset_id || DEFAULT_CHUNK_PRESET_ID
-        }
+      if (!editForm.dify_api_url.trim().endsWith('/v1')) {
+        editModalTab.value = 'basic'
+        message.error('Dify API URL 必须以 /v1 结尾')
+        return
       }
+      updateData.additional_params = {
+        dify_api_url: editForm.dify_api_url.trim(),
+        dify_token: editForm.dify_token.trim(),
+        dify_dataset_id: editForm.dify_dataset_id.trim()
+      }
+    } else if (isNotionKb.value) {
+      if (!editForm.notion_data_source_id?.trim()) {
+        editModalTab.value = 'basic'
+        message.error('请填写 Notion Data Source ID')
+        return
+      }
+      updateData.additional_params = {
+        notion_data_source_id: editForm.notion_data_source_id.trim(),
+        notion_version: editForm.notion_version?.trim() || '2026-03-11'
+      }
+      if (editForm.notion_token?.trim()) {
+        updateData.additional_params.notion_token = editForm.notion_token.trim()
+      }
+    } else {
+      updateData.additional_params = {
+        chunk_preset_id: editForm.chunk_preset_id || DEFAULT_CHUNK_PRESET_ID
+      }
+    }
 
-      await store.updateDatabaseInfo(updateData)
-      editModalVisible.value = false
-    })
-    .catch((err) => {
-      console.error('表单验证失败:', err)
-    })
-}
+    if (searchConfigPanelRef.value?.hasChanges?.()) {
+      const searchConfigSaved = await searchConfigPanelRef.value.save({ notify: false })
+      if (searchConfigSaved === false) {
+        editModalTab.value = 'retrieval'
+        return
+      }
+    }
 
-const deleteDatabase = () => {
-  store.deleteDatabase()
+    await store.updateDatabaseInfo(updateData)
+  } catch (err) {
+    editModalTab.value = 'basic'
+    console.error('表单验证失败:', err)
+  } finally {
+    editSaving.value = false
+  }
 }
 
 onMounted(() => {
   loadChunkPresetOptions()
   loadDepartments()
   loadUsers()
+  document.addEventListener('click', onUploadMenuOutsideClick)
+})
+
+onUnmounted(() => {
+  store.stopAutoRefresh()
+  virtualFolderStreamController.value?.abort()
+  document.removeEventListener('click', onUploadMenuOutsideClick)
 })
 </script>
 
@@ -1046,48 +1248,11 @@ onMounted(() => {
 
 .query-config-panel {
   overflow: hidden;
-}
 
-.query-config-layout {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  gap: 12px;
-}
-
-.query-test-pane {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-}
-
-.query-test-pane :deep(.query-section) {
-  flex: 1;
-  min-width: 0;
-}
-
-.query-config-pane {
-  width: 360px;
-  flex: 0 0 360px;
-  min-height: 0;
-  display: flex;
-}
-
-.query-config-pane .search-config-wrapper {
-  width: 100%;
-}
-
-.query-config-pane :deep(.ant-row) {
-  margin-right: 0 !important;
-  margin-left: 0 !important;
-}
-
-.query-config-pane :deep(.ant-col) {
-  max-width: 100%;
-  flex: 0 0 100%;
-  padding-right: 0 !important;
-  padding-left: 0 !important;
+  :deep(.query-section) {
+    flex: 1;
+    min-width: 0;
+  }
 }
 
 .file-panel-toolbar {
@@ -1145,6 +1310,80 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
+.file-action-dropdown {
+  position: relative;
+
+  .extension-panel-action {
+    font-size: 12px;
+  }
+}
+
+.file-action-chevron {
+  transition: transform 0.15s ease;
+
+  &.is-open {
+    transform: rotate(180deg);
+  }
+}
+
+.file-action-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  min-width: 130px;
+  padding: 4px;
+  background: var(--gray-0);
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.file-action-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gray-700);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+
+  &:hover {
+    background: var(--gray-100);
+    color: var(--gray-900);
+  }
+
+  &:active {
+    transform: scale(0.97);
+  }
+}
+
+.file-action-menu-enter-active {
+  transition:
+    opacity 0.16s ease,
+    transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.file-action-menu-leave-active {
+  transition:
+    opacity 0.12s ease,
+    transform 0.16s ease;
+}
+
+.file-action-menu-enter-from,
+.file-action-menu-leave-to {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.96);
+}
+
 .file-panel-desc {
   font-size: 12px;
   color: var(--gray-500);
@@ -1160,17 +1399,28 @@ onMounted(() => {
 
 .file-stat-card {
   min-width: 60px;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 16px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--main-0);
-  border: 1px solid var(--gray-100);
-  color: var(--main-color);
-  font: inherit;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 6px;
+  background: var(--gray-0);
+  border: 1px solid var(--gray-200);
+  box-shadow: none;
+  color: var(--gray-700);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1;
   appearance: none;
-  text-align: left;
+  text-align: center;
+  cursor: default;
+  justify-content: center;
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease;
 
   div {
     display: flex;
@@ -1178,25 +1428,40 @@ onMounted(() => {
     gap: 1px;
   }
 
-  strong {
-    font-size: 14px;
-    line-height: 1.2;
-    color: var(--gray-900);
+  svg {
+    flex: 0 0 auto;
+  }
+
+  .file-stat-value,
+  .file-stat-label {
     white-space: nowrap;
   }
 
-  span {
-    font-size: 11px;
+  .file-stat-value {
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.2;
+    color: var(--gray-900);
+  }
+
+  .file-stat-label {
+    font-size: 10px;
+    font-weight: 400;
     color: var(--gray-500);
-    white-space: nowrap;
+  }
+
+  &:hover:not(:disabled),
+  &:focus-visible:not(:disabled) {
+    border-color: var(--gray-300);
+    background: var(--gray-0);
+    color: var(--gray-900);
+    outline: none;
   }
 }
 
 .file-stat-summary {
   min-width: 87px;
-  min-height: 36px;
-  gap: 8px;
-  padding: 5px 10px;
+  min-height: 30px;
 
   .file-stat-inline {
     flex-direction: row;
@@ -1205,23 +1470,32 @@ onMounted(() => {
   }
 }
 
-.file-stat-action {
+.file-stat-warning {
   cursor: pointer;
-  color: var(--color-warning-500);
-  border: 1px solid var(--color-warning-100);
-  background-color: var(--color-warning-50);
-  transition:
-    background 0.15s,
-    border-color 0.15s;
+  color: var(--color-warning-700);
+  border-color: var(--color-warning-100);
+  background: var(--color-warning-50);
 
-  &:hover {
-    border-color: var(--color-warning-700);
+  .file-stat-value {
+    color: var(--color-warning-900);
+  }
+
+  &:hover:not(:disabled),
+  &:focus-visible:not(:disabled) {
+    border-color: var(--color-warning-500);
+    background: var(--color-warning-50);
+    color: var(--color-warning-900);
   }
 
   &:disabled {
     cursor: not-allowed;
     opacity: 0.6;
   }
+}
+
+.virtual-folder-migration-message {
+  margin-top: 8px;
+  color: var(--gray-600);
 }
 
 .file-stat-repair {
@@ -1251,45 +1525,41 @@ onMounted(() => {
   }
 }
 
-.search-config-wrapper {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--gray-200);
-  border-radius: 8px;
-  background: var(--gray-0);
-  overflow: hidden;
+.database-edit-tabs :deep(.ant-tabs-nav) {
+  margin-bottom: 20px;
 }
 
-.search-config-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--gray-150);
-  flex-shrink: 0;
-
-  h3 {
-    margin: 0 0 4px;
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--gray-900);
-  }
-
-  p {
-    margin: 0;
-    font-size: 13px;
-    color: var(--gray-500);
-  }
+.database-edit-tab-content {
+  min-height: 360px;
 }
 
-.search-config-body {
-  flex: 1;
-  min-height: 0;
+.database-edit-tab-description {
+  margin: 0 0 16px;
+  color: var(--gray-500);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.retrieval-config-content {
+  min-width: 0;
+  padding: 0;
+  overflow-x: hidden;
+}
+
+:global(.database-edit-modal .ant-modal-body) {
+  max-height: min(680px, 70vh);
   overflow-y: auto;
-  padding: 16px;
+}
+
+:global(.database-edit-modal .ant-modal-footer) {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+:global(.database-edit-modal .ant-modal-footer .ant-btn + .ant-btn) {
+  margin-inline-start: 0;
 }
 
 .share-config-readonly {
@@ -1309,25 +1579,48 @@ onMounted(() => {
   gap: 6px;
 }
 
+.readonly-model-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 7px 11px;
+  border: 1px solid var(--gray-200);
+  border-radius: 6px;
+  background: var(--gray-25);
+}
+
+.readonly-model-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gray-800);
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.readonly-model-hint {
+  flex: 0 0 auto;
+  color: var(--gray-500);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .chunk-preset-help-icon {
   color: var(--gray-500);
   cursor: help;
   font-size: 14px;
 }
 
+.form-item-help-text {
+  margin-left: 8px;
+  color: var(--gray-500);
+  font-size: 12px;
+}
+
 @media (max-width: 1024px) {
-  .query-config-layout {
-    flex-direction: column;
-    overflow-y: auto;
-  }
-
-  .query-test-pane {
-    min-height: 360px;
-  }
-
-  .query-config-pane {
-    width: 100%;
-    flex: 0 0 auto;
+  .database-edit-tab-content {
     min-height: 320px;
   }
 }
@@ -1349,14 +1642,9 @@ onMounted(() => {
     min-width: 104px;
   }
 
-  .query-config-layout {
-    flex-direction: column;
-  }
-
-  .query-config-pane {
-    width: 100%;
-    flex: 0 0 auto;
-    min-height: 320px;
+  .retrieval-config-content :deep(.ant-col) {
+    max-width: 100%;
+    flex: 0 0 100%;
   }
 
   .file-panel-toolbar {

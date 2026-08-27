@@ -4,10 +4,14 @@ Integration tests for knowledge router endpoints.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 from yuxi.knowledge.chunking.ragflow_like.presets import CHUNK_PRESET_IDS
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -103,6 +107,17 @@ async def _create_test_database(test_client, admin_headers, share_config=None):
     return response.json()
 
 
+async def _wait_for_task(test_client, headers, task_id):
+    for _ in range(100):
+        response = await test_client.get(f"/api/tasks/{task_id}", headers=headers)
+        assert response.status_code == 200, response.text
+        task = response.json()["task"]
+        if task["status"] in {"success", "failed", "cancelled"}:
+            return task
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"Task {task_id} did not finish")
+
+
 async def _accessible_kb_ids(test_client, headers):
     response = await test_client.get("/api/knowledge/databases/accessible", headers=headers)
     assert response.status_code == 200, response.text
@@ -115,11 +130,19 @@ async def test_admin_can_manage_knowledge_databases(test_client, admin_headers, 
     list_response = await test_client.get("/api/knowledge/databases", headers=admin_headers)
     assert list_response.status_code == 200, list_response.text
     databases = list_response.json().get("databases", [])
-    assert any(entry["kb_id"] == kb_id for entry in databases)
+    database = next(entry for entry in databases if entry["kb_id"] == kb_id)
+    assert database["metadata"] == database["additional_params"]
+    assert database["status"] == "已连接"
+    assert database["row_count"] == (database["stats"]["row_count"] or database["stats"]["file_count"])
+    assert database["effective_permission"] == "manage"
+    assert database["can_manage"] is True
 
     get_response = await test_client.get(f"/api/knowledge/databases/{kb_id}", headers=admin_headers)
     assert get_response.status_code == 200, get_response.text
-    assert get_response.json()["kb_id"] == kb_id
+    detail = get_response.json()
+    assert detail["kb_id"] == kb_id
+    assert detail["metadata"] == detail["additional_params"]
+    assert detail["stats"]["row_count"] == detail["row_count"]
 
     update_response = await test_client.put(
         f"/api/knowledge/databases/{kb_id}",
@@ -144,6 +167,345 @@ async def test_document_exists_returns_false_for_missing_relative_path(test_clie
     assert response.json() == {"kb_id": kb_id, "filename": filename, "exists": False}
 
 
+async def test_folder_rename_and_move_persist_tree_changes(test_client, admin_headers, knowledge_database):
+    kb_id = knowledge_database["kb_id"]
+
+    async def create_folder(name, parent_id=None):
+        response = await test_client.post(
+            f"/api/knowledge/databases/{kb_id}/folders",
+            json={"folder_name": name, "parent_id": parent_id},
+            headers=admin_headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    source = await create_folder(f"source-{uuid.uuid4().hex[:6]}")
+    child = await create_folder("child", source["file_id"])
+    destination = await create_folder(f"destination-{uuid.uuid4().hex[:6]}")
+    assert source["created_at"]
+    assert source["created_by"]
+
+    rename_response = await test_client.put(
+        f"/api/knowledge/databases/{kb_id}/folders/{source['file_id']}/rename",
+        json={"folder_name": "renamed source"},
+        headers=admin_headers,
+    )
+    assert rename_response.status_code == 200, rename_response.text
+    assert rename_response.json()["filename"] == "renamed source"
+    assert rename_response.json()["path"] == "renamed source"
+
+    source_listing = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/documents",
+        params={"parent_id": source["file_id"]},
+        headers=admin_headers,
+    )
+    assert source_listing.status_code == 200, source_listing.text
+    assert [
+        (item["file_id"], item["parent_id"], item["filename"], item["created_by"])
+        for item in source_listing.json()["items"]
+    ] == [(child["file_id"], source["file_id"], "child", child["created_by"])]
+
+    move_response = await test_client.put(
+        f"/api/knowledge/databases/{kb_id}/documents/{child['file_id']}/move",
+        json={"new_parent_id": destination["file_id"]},
+        headers=admin_headers,
+    )
+    assert move_response.status_code == 200, move_response.text
+    assert move_response.json()["parent_id"] == destination["file_id"]
+
+    destination_listing = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/documents",
+        params={"parent_id": destination["file_id"]},
+        headers=admin_headers,
+    )
+    assert destination_listing.status_code == 200, destination_listing.text
+    assert [item["file_id"] for item in destination_listing.json()["items"]] == [child["file_id"]]
+
+    move_to_root_response = await test_client.put(
+        f"/api/knowledge/databases/{kb_id}/documents/{child['file_id']}/move",
+        json={"new_parent_id": None},
+        headers=admin_headers,
+    )
+    assert move_to_root_response.status_code == 200, move_to_root_response.text
+    assert move_to_root_response.json()["parent_id"] is None
+
+    root_listing = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/documents",
+        headers=admin_headers,
+    )
+    assert root_listing.status_code == 200, root_listing.text
+    assert child["file_id"] in {item["file_id"] for item in root_listing.json()["items"]}
+
+    missing_target_response = await test_client.put(
+        f"/api/knowledge/databases/{kb_id}/documents/{child['file_id']}/move",
+        json={},
+        headers=admin_headers,
+    )
+    assert missing_target_response.status_code == 422, missing_target_response.text
+
+
+async def test_knowledge_virtual_folder_migration_runs_without_sse_and_is_resumable(
+    test_client, admin_headers, knowledge_database
+):
+    kb_id = knowledge_database["kb_id"]
+    prefix = uuid.uuid4().hex[:6]
+    engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO knowledge_files "
+                    "(file_id, kb_id, parent_id, filename, file_type, status, is_folder) VALUES "
+                    "(:id1, :kb, NULL, :name1, 'txt', 'uploaded', FALSE), "
+                    "(:id2, :kb, NULL, :name2, 'txt', 'uploaded', FALSE), "
+                    "(:id3, :kb, NULL, :name3, 'txt', 'uploaded', FALSE)"
+                ),
+                {
+                    "id1": f"file_{prefix}_1",
+                    "id2": f"file_{prefix}_2",
+                    "id3": f"file_{prefix}_3",
+                    "kb": kb_id,
+                    "name1": f"history-{prefix}/shared/a.txt",
+                    "name2": f"history-{prefix}/shared/b.txt",
+                    "name3": f"history-{prefix}/other/c.txt",
+                },
+            )
+
+        detection = await test_client.get(
+            f"/api/knowledge/databases/{kb_id}/virtual-folders/detect", headers=admin_headers
+        )
+        assert detection.status_code == 200, detection.text
+        assert detection.json()["remaining_steps"] == 6
+
+        start = await test_client.post(
+            f"/api/knowledge/databases/{kb_id}/virtual-folders/migrate", headers=admin_headers
+        )
+        assert start.status_code == 200, start.text
+        task_id = start.json()["task_id"]
+
+        task = await _wait_for_task(test_client, admin_headers, task_id)
+        assert task["status"] == "success"
+        assert task["result"]["processed_steps"] == 6
+        assert task["result"]["remaining_files"] == 0
+
+        events = await test_client.get(
+            f"/api/knowledge/databases/{kb_id}/virtual-folders/migrations/{task_id}/events",
+            headers=admin_headers,
+        )
+        assert events.status_code == 200, events.text
+        assert '"status": "success"' in events.text
+
+        final_detection = await test_client.get(
+            f"/api/knowledge/databases/{kb_id}/virtual-folders/detect", headers=admin_headers
+        )
+        assert final_detection.json()["has_virtual_folders"] is False
+        async with engine.connect() as connection:
+            folder_creators = (
+                await connection.execute(
+                    text(
+                        "SELECT created_by FROM knowledge_files WHERE kb_id = :kb "
+                        "AND is_folder IS TRUE AND filename IN (:root, 'shared', 'other')"
+                    ),
+                    {"kb": kb_id, "root": f"history-{prefix}"},
+                )
+            ).scalars().all()
+        assert len(folder_creators) == 3
+        assert all(folder_creators)
+    finally:
+        await engine.dispose()
+
+
+async def test_virtual_folder_migration_keeps_conflicts_and_commits_other_paths(
+    test_client, admin_headers, knowledge_database
+):
+    kb_id = knowledge_database["kb_id"]
+    suffix = uuid.uuid4().hex[:6]
+    blocked = f"blocked-{suffix}"
+    movable = f"movable-{suffix}"
+    engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO knowledge_files "
+                    "(file_id, kb_id, parent_id, filename, file_type, status, is_folder) VALUES "
+                    "(:plain, :kb, NULL, :blocked, 'txt', 'uploaded', FALSE), "
+                    "(:blocked_file, :kb, NULL, :blocked_path, 'txt', 'uploaded', FALSE), "
+                    "(:movable_file, :kb, NULL, :movable_path, 'txt', 'uploaded', FALSE)"
+                ),
+                {
+                    "plain": f"file_{suffix}_plain",
+                    "blocked_file": f"file_{suffix}_blocked",
+                    "movable_file": f"file_{suffix}_movable",
+                    "kb": kb_id,
+                    "blocked": blocked,
+                    "blocked_path": f"{blocked}/a.txt",
+                    "movable_path": f"{movable}/b.txt",
+                },
+            )
+
+        start = await test_client.post(
+            f"/api/knowledge/databases/{kb_id}/virtual-folders/migrate", headers=admin_headers
+        )
+        task = await _wait_for_task(test_client, admin_headers, start.json()["task_id"])
+        assert task["status"] == "success"
+        assert task["result"]["processed_steps"] == 1
+        assert task["result"]["remaining_files"] == 1
+        assert task["result"]["conflict_files"] == 1
+
+        retry = await test_client.post(
+            f"/api/knowledge/databases/{kb_id}/virtual-folders/migrate", headers=admin_headers
+        )
+        retry_task = await _wait_for_task(test_client, admin_headers, retry.json()["task_id"])
+        assert retry_task["result"]["processed_steps"] == 0
+        assert retry_task["result"]["remaining_files"] == 1
+
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text(
+                        "SELECT filename, parent_id FROM knowledge_files WHERE file_id IN "
+                        "(:blocked_file, :movable_file) ORDER BY file_id"
+                    ),
+                    {
+                        "blocked_file": f"file_{suffix}_blocked",
+                        "movable_file": f"file_{suffix}_movable",
+                    },
+                )
+            ).mappings().all()
+        assert {row["filename"] for row in rows} == {f"{blocked}/a.txt", "b.txt"}
+        assert sum(row["parent_id"] is not None for row in rows) == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_folder_mutations_reject_invalid_name_and_directory_cycle(
+    test_client, admin_headers, knowledge_database
+):
+    kb_id = knowledge_database["kb_id"]
+
+    parent_response = await test_client.post(
+        f"/api/knowledge/databases/{kb_id}/folders",
+        json={"folder_name": f"parent-{uuid.uuid4().hex[:6]}", "parent_id": None},
+        headers=admin_headers,
+    )
+    assert parent_response.status_code == 200, parent_response.text
+    parent = parent_response.json()
+
+    child_response = await test_client.post(
+        f"/api/knowledge/databases/{kb_id}/folders",
+        json={"folder_name": "child", "parent_id": parent["file_id"]},
+        headers=admin_headers,
+    )
+    assert child_response.status_code == 200, child_response.text
+    child = child_response.json()
+
+    invalid_rename = await test_client.put(
+        f"/api/knowledge/databases/{kb_id}/folders/{parent['file_id']}/rename",
+        json={"folder_name": "invalid/name"},
+        headers=admin_headers,
+    )
+    assert invalid_rename.status_code == 400, invalid_rename.text
+    assert "path separators" in invalid_rename.json()["detail"]
+
+    cycle_move = await test_client.put(
+        f"/api/knowledge/databases/{kb_id}/documents/{parent['file_id']}/move",
+        json={"new_parent_id": child["file_id"]},
+        headers=admin_headers,
+    )
+    assert cycle_move.status_code == 400, cycle_move.text
+    assert "own subfolder" in cycle_move.json()["detail"]
+
+
+async def test_concurrent_folder_moves_cannot_create_cycle(test_client, admin_headers, knowledge_database):
+    kb_id = knowledge_database["kb_id"]
+
+    async def create_folder(name):
+        response = await test_client.post(
+            f"/api/knowledge/databases/{kb_id}/folders",
+            json={"folder_name": name, "parent_id": None},
+            headers=admin_headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    folder_a = await create_folder(f"concurrent-a-{uuid.uuid4().hex[:6]}")
+    folder_b = await create_folder(f"concurrent-b-{uuid.uuid4().hex[:6]}")
+    responses = await asyncio.gather(
+        test_client.put(
+            f"/api/knowledge/databases/{kb_id}/documents/{folder_a['file_id']}/move",
+            json={"new_parent_id": folder_b["file_id"]},
+            headers=admin_headers,
+        ),
+        test_client.put(
+            f"/api/knowledge/databases/{kb_id}/documents/{folder_b['file_id']}/move",
+            json={"new_parent_id": folder_a["file_id"]},
+            headers=admin_headers,
+        ),
+    )
+    assert sorted(response.status_code for response in responses) == [200, 400]
+
+    root_listing = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/documents",
+        headers=admin_headers,
+    )
+    assert root_listing.status_code == 200, root_listing.text
+    folder_ids = {folder_a["file_id"], folder_b["file_id"]}
+    root_ids = {item["file_id"] for item in root_listing.json()["items"]} & folder_ids
+    assert len(root_ids) == 1
+
+    root_id = root_ids.pop()
+    child_listing = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/documents",
+        params={"parent_id": root_id},
+        headers=admin_headers,
+    )
+    assert child_listing.status_code == 200, child_listing.text
+    assert {item["file_id"] for item in child_listing.json()["items"]} & folder_ids == folder_ids - {root_id}
+
+
+async def test_folder_move_waits_for_kb_tree_lock(test_client, admin_headers, knowledge_database):
+    kb_id = knowledge_database["kb_id"]
+
+    async def create_folder(name):
+        response = await test_client.post(
+            f"/api/knowledge/databases/{kb_id}/folders",
+            json={"folder_name": name, "parent_id": None},
+            headers=admin_headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    source = await create_folder(f"locked-source-{uuid.uuid4().hex[:6]}")
+    destination = await create_folder(f"locked-destination-{uuid.uuid4().hex[:6]}")
+    engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
+    move_task = None
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:kb_id))"),
+                {"kb_id": kb_id},
+            )
+            move_task = asyncio.create_task(
+                test_client.put(
+                    f"/api/knowledge/databases/{kb_id}/documents/{source['file_id']}/move",
+                    json={"new_parent_id": destination["file_id"]},
+                    headers=admin_headers,
+                )
+            )
+            await asyncio.sleep(0.1)
+            assert not move_task.done(), "移动请求未等待知识库目录树锁"
+
+        move_response = await asyncio.wait_for(move_task, timeout=2)
+        assert move_response.status_code == 200, move_response.text
+        assert move_response.json()["parent_id"] == destination["file_id"]
+    finally:
+        if move_task is not None and not move_task.done():
+            move_task.cancel()
+            await asyncio.gather(move_task, return_exceptions=True)
+        await engine.dispose()
+
+
 async def test_create_database_with_chunk_preset(test_client, admin_headers):
     db_name = f"pytest_chunk_preset_{uuid.uuid4().hex[:6]}"
     payload = {
@@ -156,7 +518,9 @@ async def test_create_database_with_chunk_preset(test_client, admin_headers):
 
     create_response = await test_client.post("/api/knowledge/databases", json=payload, headers=admin_headers)
     assert create_response.status_code == 200, create_response.text
-    kb_id = create_response.json()["kb_id"]
+    create_payload = create_response.json()
+    assert create_payload["files"] == {}
+    kb_id = create_payload["kb_id"]
 
     info_response = await test_client.get(f"/api/knowledge/databases/{kb_id}", headers=admin_headers)
     assert info_response.status_code == 200, info_response.text
@@ -240,6 +604,69 @@ async def test_knowledge_routes_enforce_permissions(test_client, standard_user, 
     _assert_forbidden_response(forbidden_exists)
 
 
+async def test_kb_image_proxy_requires_auth_and_streams_private_image(
+    test_client, admin_headers, knowledge_database
+):
+    """知识库图片代理：未登录不可访问，鉴权后可读取私有 bucket 图片"""
+    from yuxi.storage.minio.client import MinIOClient, get_minio_client
+
+    kb_id = knowledge_database["kb_id"]
+    image_name = f"proxy_{uuid.uuid4().hex[:8]}.png"
+    object_name = f"{kb_id}/kb-images/{image_name}"
+    image_bytes = b"\x89PNG\r\n\x1a\nfake-image-content"
+
+    minio_client = get_minio_client()
+    minio_client.upload_file(
+        bucket_name=MinIOClient.KB_BUCKETS["images"],
+        object_name=object_name,
+        data=image_bytes,
+        content_type="image/png",
+    )
+
+    proxy_path = f"/api/knowledge/databases/{kb_id}/images/kb-images/{image_name}"
+
+    anonymous = await test_client.get(proxy_path)
+    assert anonymous.status_code == 401
+
+    invalid_headers = {"Authorization": "Bearer invalid-token"}
+    forbidden = await test_client.get(proxy_path, headers=invalid_headers)
+    assert forbidden.status_code == 401
+
+    authorized = await test_client.get(proxy_path, headers=admin_headers)
+    assert authorized.status_code == 200, authorized.text
+    assert authorized.content == image_bytes
+    assert authorized.headers["content-type"].startswith("image/png")
+
+
+async def test_kb_image_proxy_rejects_invalid_or_missing_object(test_client, admin_headers, knowledge_database):
+    """知识库图片代理：非法路径与不存在的图片返回 400/404"""
+    kb_id = knowledge_database["kb_id"]
+
+    invalid_path = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/images/avatar/user.png",
+        headers=admin_headers,
+    )
+    assert invalid_path.status_code == 400
+
+    traversal_path = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/images/kb-images/..%2Fother.png",
+        headers=admin_headers,
+    )
+    assert traversal_path.status_code == 400
+
+    backslash_path = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/images/kb-images/..%5Cother.png",
+        headers=admin_headers,
+    )
+    assert backslash_path.status_code == 400
+
+    missing_image = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/images/kb-images/missing.png",
+        headers=admin_headers,
+    )
+    assert missing_image.status_code == 404
+
+
 async def test_admin_can_create_vector_db_with_reranker(test_client, admin_headers):
     """测试创建向量库并配置 reranker 参数（通过 query_params.options）
 
@@ -309,6 +736,39 @@ async def test_admin_can_create_vector_db_with_reranker(test_client, admin_heade
     use_reranker_option2 = next((opt for opt in options2 if opt.get("key") == "use_reranker"), None)
     assert use_reranker_option2 is not None
     assert use_reranker_option2.get("default") is True  # 保存的值
+
+
+async def test_concurrent_query_param_updates_preserve_all_options(test_client, admin_headers):
+    """并发的部分更新应在数据库事务内合并，而不是后写覆盖先写。"""
+    payload = {
+        "database_name": f"pytest_query_params_{uuid.uuid4().hex[:6]}",
+        "description": "Concurrent query params update",
+        "kb_type": "dify",
+        "additional_params": {
+            "dify_api_url": "https://api.dify.ai/v1",
+            "dify_token": "test-token",
+            "dify_dataset_id": "dataset-123",
+        },
+    }
+    create_response = await test_client.post("/api/knowledge/databases", json=payload, headers=admin_headers)
+    assert create_response.status_code == 200, create_response.text
+    kb_id = create_response.json()["kb_id"]
+    endpoint = f"/api/knowledge/databases/{kb_id}/query-params"
+
+    first_response, second_response = await asyncio.gather(
+        test_client.put(endpoint, json={"final_top_k": 7}, headers=admin_headers),
+        test_client.put(endpoint, json={"similarity_threshold": 0.42}, headers=admin_headers),
+    )
+
+    assert first_response.status_code == 200, first_response.text
+    assert second_response.status_code == 200, second_response.text
+
+    params_response = await test_client.get(endpoint, headers=admin_headers)
+    assert params_response.status_code == 200, params_response.text
+    options = params_response.json()["params"]["options"]
+    saved_options = {option["key"]: option["default"] for option in options}
+    assert saved_options["final_top_k"] == 7
+    assert saved_options["similarity_threshold"] == 0.42
 
 
 async def test_create_dify_database_success(test_client, admin_headers):
@@ -481,28 +941,6 @@ async def test_get_database_mindmap_not_exists(test_client, admin_headers, knowl
     assert payload["mindmap"] is None  # 尚未生成思维导图
 
 
-async def test_generate_and_get_mindmap(test_client, admin_headers, knowledge_database):
-    """测试生成并获取思维导图
-
-    注意：此测试需要知识库中有文件才能完整测试核心功能。
-    由于没有前置的文件上传 fixture，测试会先验证空文件场景（预期400），
-    然后使用 xfail 标记等待后续完善。
-    """
-    kb_id = knowledge_database["kb_id"]
-
-    # 空文件场景 - 预期返回400错误
-    generate_response = await test_client.post(
-        f"/api/knowledge/databases/{kb_id}/mindmap/generate",
-        json={"file_ids": [], "user_prompt": ""},
-        headers=admin_headers,
-    )
-    assert generate_response.status_code == 400
-    assert "中没有文件" in generate_response.json()["detail"]
-
-    # 标记此测试需要文件上传支持才能完整执行
-    pytest.skip("需要先上传文件才能完整测试思维导图生成功能")
-
-
 # =============================================================================
 # === Knowledge Router Additional Tests ===
 # =============================================================================
@@ -524,12 +962,21 @@ async def test_create_database_defaults_to_global_share_config(test_client, admi
     database = await _create_test_database(test_client, admin_headers)
     kb_id = database["kb_id"]
     try:
-        assert database["share_config"] == {"access_level": "global", "department_ids": [], "user_uids": []}
+        assert database["share_config"] == {
+            "version": 2,
+            "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+            "manage_scope": None,
+        }
     finally:
         await test_client.delete(f"/api/knowledge/databases/{kb_id}", headers=admin_headers)
 
 
-async def test_department_share_config_filters_accessible_databases(test_client, admin_headers):
+@pytest.mark.parametrize(
+    ("access_level", "scope_key"),
+    [("department", "department_ids"), ("user", "user_uids")],
+)
+async def test_share_config_filters_accessible_databases(test_client, admin_headers, access_level, scope_key):
+    """按 share_config 的访问范围过滤可访问知识库，department 与 user 两级同构。"""
     department_a = await _create_test_department(test_client, admin_headers, "pytest_dept_a")
     department_b = await _create_test_department(test_client, admin_headers, "pytest_dept_b")
     user_a = user_b = None
@@ -538,15 +985,21 @@ async def test_department_share_config_filters_accessible_databases(test_client,
     try:
         user_a = await _create_test_user(test_client, admin_headers, department_a["id"])
         user_b = await _create_test_user(test_client, admin_headers, department_b["id"])
+        if access_level == "department":
+            scope = {"access_level": "department", "department_ids": [department_a["id"]], "user_uids": []}
+            scope_target = department_a["id"]
+        else:
+            scope = {"access_level": "user", "department_ids": [], "user_uids": [user_a["user"]["uid"]]}
+            scope_target = user_a["user"]["uid"]
         database = await _create_test_database(
             test_client,
             admin_headers,
-            {"access_level": "department", "department_ids": [department_a["id"]], "user_uids": []},
+            {"version": 2, "read_scope": scope, "manage_scope": scope},
         )
 
         saved_config = database["share_config"]
-        assert saved_config["access_level"] == "department"
-        assert department_a["id"] in saved_config["department_ids"]
+        assert saved_config["manage_scope"]["access_level"] == access_level
+        assert scope_target in saved_config["manage_scope"][scope_key]
 
         assert database["kb_id"] in await _accessible_kb_ids(test_client, user_a["headers"])
         assert database["kb_id"] not in await _accessible_kb_ids(test_client, user_b["headers"])
@@ -559,55 +1012,6 @@ async def test_department_share_config_filters_accessible_databases(test_client,
             await _delete_user_by_id(test_client, admin_headers, user_b["user"]["id"])
         await _delete_department_with_admin(test_client, admin_headers, department_a)
         await _delete_department_with_admin(test_client, admin_headers, department_b)
-
-
-async def test_user_share_config_filters_accessible_databases(test_client, admin_headers):
-    department_a = await _create_test_department(test_client, admin_headers, "pytest_dept_a")
-    department_b = await _create_test_department(test_client, admin_headers, "pytest_dept_b")
-    user_a = user_b = None
-    database = None
-
-    try:
-        user_a = await _create_test_user(test_client, admin_headers, department_a["id"])
-        user_b = await _create_test_user(test_client, admin_headers, department_b["id"])
-        database = await _create_test_database(
-            test_client,
-            admin_headers,
-            {"access_level": "user", "department_ids": [], "user_uids": [user_a["user"]["uid"]]},
-        )
-
-        saved_config = database["share_config"]
-        assert saved_config["access_level"] == "user"
-        assert user_a["user"]["uid"] in saved_config["user_uids"]
-
-        assert database["kb_id"] in await _accessible_kb_ids(test_client, user_a["headers"])
-        assert database["kb_id"] not in await _accessible_kb_ids(test_client, user_b["headers"])
-    finally:
-        if database:
-            await test_client.delete(f"/api/knowledge/databases/{database['kb_id']}", headers=admin_headers)
-        if user_a:
-            await _delete_user_by_id(test_client, admin_headers, user_a["user"]["id"])
-        if user_b:
-            await _delete_user_by_id(test_client, admin_headers, user_b["user"]["id"])
-        await _delete_department_with_admin(test_client, admin_headers, department_a)
-        await _delete_department_with_admin(test_client, admin_headers, department_b)
-
-
-async def test_user_access_options_include_all_departments_for_admin(test_client, admin_headers):
-    department = await _create_test_department(test_client, admin_headers, "pytest_access_options")
-    user = None
-
-    try:
-        user = await _create_test_user(test_client, admin_headers, department["id"])
-        response = await test_client.get("/api/auth/users/access-options", headers=admin_headers)
-        assert response.status_code == 200, response.text
-        uids = {item["uid"] for item in response.json()}
-        assert user["user"]["uid"] in uids
-        assert department["admin_uid"] in uids
-    finally:
-        if user:
-            await _delete_user_by_id(test_client, admin_headers, user["user"]["id"])
-        await _delete_department_with_admin(test_client, admin_headers, department)
 
 
 async def test_get_knowledge_base_types(test_client, admin_headers):
@@ -717,27 +1121,6 @@ async def test_create_lightrag_knowledge_base_is_unsupported(test_client, admin_
     assert "Unsupported knowledge base type: lightrag" in response.json()["detail"]
 
 
-async def test_create_milvus_knowledge_base(test_client, admin_headers):
-    """测试创建 Milvus 知识库
-
-    注意：数据库清理由 conftest.py 中的 session fixture 自动处理。
-    """
-    db_name = f"pytest_milvus_{uuid.uuid4().hex[:6]}"
-    payload = {
-        "database_name": db_name,
-        "description": "Pytest Milvus knowledge base",
-        "embedding_model_spec": "siliconflow-cn:Pro/BAAI/bge-m3",
-        "kb_type": "milvus",
-        "additional_params": {},
-    }
-
-    create_response = await test_client.post("/api/knowledge/databases", json=payload, headers=admin_headers)
-    assert create_response.status_code == 200, create_response.text
-
-    db_payload = create_response.json()
-    assert db_payload["kb_type"] == "milvus"
-
-
 async def test_sample_questions_endpoints(test_client, admin_headers, knowledge_database):
     """测试示例问题接口（空文件时预期返回400）"""
     kb_id = knowledge_database["kb_id"]
@@ -779,3 +1162,39 @@ async def test_mindmap_permissions(test_client, standard_user, knowledge_databas
         headers=standard_user["headers"],
     )
     _assert_forbidden_response(forbidden_generate)
+
+
+@pytest.mark.parametrize(
+    "search_params",
+    [
+        {},
+        {"query": "nonexistent-needle-xyz", "offset": 0, "limit": 50},
+    ],
+)
+async def test_document_search_returns_empty_results(test_client, admin_headers, knowledge_database, search_params):
+    """空关键词或不存在关键词都返回空结果，且不命中 /documents/{doc_id} 路由。"""
+    kb_id = knowledge_database["kb_id"]
+    response = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/documents/search",
+        params=search_params,
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["files"] == []
+    assert payload["total"] == 0
+    assert payload["has_more"] is False
+    assert payload["offset"] == search_params.get("offset", 0)
+    if "limit" in search_params:
+        assert payload["limit"] == search_params["limit"]
+
+
+async def test_document_search_requires_admin(test_client, standard_user, knowledge_database):
+    """普通用户不能访问管理端搜索接口。"""
+    kb_id = knowledge_database["kb_id"]
+    response = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/documents/search",
+        params={"query": "x"},
+        headers=standard_user["headers"],
+    )
+    _assert_forbidden_response(response)

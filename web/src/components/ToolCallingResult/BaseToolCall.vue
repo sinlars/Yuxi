@@ -59,42 +59,45 @@
     </div>
 
     <!-- Content Area -->
-    <div v-if="isExpanded" class="tool-content">
-      <!-- Params Slot -->
-      <div class="tool-params" v-if="hasParams && !hideParams">
-        <slot name="params" :tool-call="toolCall" :args="formattedArgs">
-          <div class="tool-params-content">
-            <strong>参数: </strong>
-            <span>{{ formattedArgs }}</span>
-          </div>
-        </slot>
-      </div>
+    <CollapseTransition>
+      <div v-if="isExpanded" class="tool-content">
+        <!-- Params Slot -->
+        <div class="tool-params" v-if="hasParams && !hideParams">
+          <slot name="params" :tool-call="toolCall" :args="formattedArgs">
+            <div class="tool-params-content">
+              <strong>参数: </strong>
+              <span>{{ formattedArgs }}</span>
+            </div>
+          </slot>
+        </div>
 
-      <!-- Result Slot -->
-      <div class="tool-result" style="opacity: 0.8" v-if="hasResult || forceShowResult">
-        <slot name="result" :tool-call="toolCall" :result-content="resultContent">
-          <div class="tool-result-content" :data-tool-call-id="toolCall.id">
-            <!-- Default rendering -->
-            <div class="tool-result-renderer">
-              <div class="default-result">
-                <div class="default-content">
-                  <pre>{{ formatResultData(parsedResultData) }}</pre>
+        <!-- Result Slot -->
+        <div class="tool-result" style="opacity: 0.8" v-if="hasResult || forceShowResult">
+          <slot name="result" :tool-call="toolCall" :result-content="resultContent">
+            <div class="tool-result-content" :data-tool-call-id="toolCall.id">
+              <!-- Default rendering -->
+              <div class="tool-result-renderer">
+                <div class="default-result">
+                  <div class="default-content">
+                    <pre>{{ formatResultData(parsedResultData) }}</pre>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        </slot>
+          </slot>
+        </div>
       </div>
-    </div>
+    </CollapseTransition>
   </div>
 </template>
 
 <script setup>
 import { ref, computed } from 'vue'
-import { Loader, ChevronsUpDown, ChevronsDownUp, XCircle, CheckCircle } from 'lucide-vue-next'
+import { Loader, ChevronsUpDown, ChevronsDownUp, XCircle, CheckCircle } from '@lucide/vue'
 import { useAgentStore } from '@/stores/agent'
 import { storeToRefs } from 'pinia'
-import { getToolCallId, getToolIcon } from './toolRegistry'
+import CollapseTransition from '@/components/common/CollapseTransition.vue'
+import { getToolCallId, getToolIcon, getToolName, findToolInList } from './toolRegistry'
 
 const props = defineProps({
   toolCall: {
@@ -126,7 +129,7 @@ const props = defineProps({
 })
 
 const agentStore = useAgentStore()
-const { availableTools } = storeToRefs(agentStore)
+const { availableTools, toolMetadata } = storeToRefs(agentStore)
 
 const isExpanded = ref(props.defaultExpanded)
 const isTimeline = computed(() => props.appearance === 'timeline')
@@ -144,13 +147,21 @@ const effectiveStatus = computed(() => {
 })
 
 // Tool Name Logic
+// 展示优先级：完整工具元数据中的 display name > 前端兜底名称映射 > 工具 id
 const toolId = computed(() => getToolCallId(props.toolCall))
 
 const toolName = computed(() => {
-  const toolsList = availableTools.value ? Object.values(availableTools.value) : []
-  const tool = toolsList.find((t) => t.id === toolId.value)
-  return tool ? tool.name : toolId.value
+  const tool = findToolInList(toolId.value, toolMetadataList.value)
+  return tool ? tool.name : getToolName(toolId.value)
 })
+
+const toolMetadataList = computed(() =>
+  toolMetadata.value.length
+    ? toolMetadata.value
+    : availableTools.value
+      ? Object.values(availableTools.value)
+      : []
+)
 
 // Tool Icon Mapping
 const toolIcon = computed(() => getToolIcon(toolId.value))
@@ -348,8 +359,6 @@ const formatResultData = (data) => {
   }
 
   .tool-content {
-    transition: all 0.3s ease;
-
     .tool-params {
       padding: 8px 12px;
       background-color: var(--gray-25);

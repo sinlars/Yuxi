@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+import json
+import uuid
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
@@ -8,14 +11,159 @@ from sqlalchemy import DateTime, String, case, cast, func, literal, or_, select,
 
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import KnowledgeFile
+from yuxi.utils import logger
 from yuxi.utils.datetime_utils import utc_now_naive
 
 # asyncpg 单条 SQL 参数上限为 32767；按 file_id 批量查询时统一分批，避免
 # mindmap_file_ids 等大尺寸传入触发 `too many parameters` 报错。
 SQL_IN_BATCH_SIZE = 10_000
 
+# 文件统计聚合缓存 TTL：列表页高频请求时避免反复全表聚合；文件增删后最多延迟该时长更新
+KB_FILE_STATS_CACHE_TTL = 10
+
 
 class KnowledgeFileRepository:
+    @asynccontextmanager
+    async def lock_file_tree(self, kb_id: str) -> AsyncIterator[None]:
+        """按知识库串行化目录树结构修改。"""
+        async with pg_manager.get_async_session_context() as session:
+            await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(kb_id))))
+            yield
+
+    async def detect_virtual_folder_data(self, kb_id: str) -> dict[str, int | bool]:
+        """检测仍以相对路径保存的历史文件记录。"""
+        path_record = KnowledgeFile.filename.contains("/")
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(
+                    func.count(KnowledgeFile.file_id),
+                    func.coalesce(
+                        func.sum(
+                            func.length(KnowledgeFile.filename)
+                            - func.length(func.replace(KnowledgeFile.filename, "/", ""))
+                        ),
+                        0,
+                    ),
+                ).where(
+                    KnowledgeFile.kb_id == kb_id,
+                    or_(KnowledgeFile.is_folder.is_(False), KnowledgeFile.is_folder.is_(None)),
+                    path_record,
+                )
+            )
+            file_count, remaining_steps = result.one()
+        count = int(file_count or 0)
+        return {
+            "has_virtual_folders": count > 0,
+            "file_count": count,
+            "remaining_steps": int(remaining_steps or 0),
+        }
+
+    async def migrate_virtual_folder_batch(
+        self,
+        *,
+        kb_id: str,
+        operator_id: str,
+        after_file_id: str | None,
+        batch_size: int = 500,
+    ) -> dict[str, Any]:
+        """原子迁移一批文件的首个路径段。"""
+        filters = [
+            KnowledgeFile.kb_id == kb_id,
+            or_(KnowledgeFile.is_folder.is_(False), KnowledgeFile.is_folder.is_(None)),
+            KnowledgeFile.filename.contains("/"),
+        ]
+        if after_file_id:
+            filters.append(KnowledgeFile.file_id > after_file_id)
+
+        async with pg_manager.get_async_session_context() as session:
+            await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(kb_id))))
+            records = list(
+                (
+                    await session.execute(
+                        select(KnowledgeFile).where(*filters).order_by(KnowledgeFile.file_id).limit(batch_size)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not records:
+                return {"scanned": 0, "processed": 0, "created_folders": 0, "conflict_file_ids": []}
+
+            groups: dict[tuple[str | None, str], list[KnowledgeFile]] = {}
+            conflict_file_ids: list[str] = []
+            for record in records:
+                segment, remainder = record.filename.split("/", 1)
+                if not segment or segment in {".", ".."} or not remainder:
+                    conflict_file_ids.append(record.file_id)
+                    continue
+                groups.setdefault((record.parent_id, segment), []).append(record)
+
+            processed = 0
+            created_folders = 0
+            for (parent_id, segment), group in groups.items():
+                sibling_result = await session.execute(
+                    select(KnowledgeFile).where(
+                        KnowledgeFile.kb_id == kb_id,
+                        self._parent_condition(parent_id),
+                        KnowledgeFile.filename == segment,
+                    )
+                )
+                siblings = list(sibling_result.scalars().all())
+                if len(siblings) == 1 and siblings[0].is_folder:
+                    folder = siblings[0]
+                elif siblings:
+                    conflict_file_ids.extend(record.file_id for record in group)
+                    continue
+                else:
+                    folder = KnowledgeFile(
+                        file_id=f"folder-{uuid.uuid4()}",
+                        kb_id=kb_id,
+                        parent_id=parent_id,
+                        filename=segment,
+                        path=segment,
+                        file_type="folder",
+                        status="done",
+                        is_folder=True,
+                        file_size=0,
+                        chunk_count=0,
+                        token_count=0,
+                        created_by=operator_id,
+                    )
+                    session.add(folder)
+                    await session.flush()
+                    created_folders += 1
+
+                for record in group:
+                    record.parent_id = folder.file_id
+                    record.filename = record.filename.split("/", 1)[1]
+                    processed += 1
+
+            return {
+                "scanned": len(records),
+                "processed": processed,
+                "created_folders": created_folders,
+                "conflict_file_ids": conflict_file_ids,
+                "last_file_id": records[-1].file_id,
+            }
+
+    async def aggregate_dashboard_stats(self) -> list[tuple[str, int, int, int]]:
+        """按文件类型聚合真实文件数、大小与 Chunk 数。"""
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(
+                select(
+                    KnowledgeFile.file_type,
+                    func.count(KnowledgeFile.file_id),
+                    func.coalesce(func.sum(KnowledgeFile.file_size), 0),
+                    func.coalesce(func.sum(KnowledgeFile.chunk_count), 0),
+                )
+                .where(or_(KnowledgeFile.is_folder.is_(False), KnowledgeFile.is_folder.is_(None)))
+                .group_by(KnowledgeFile.file_type)
+            )
+            return [
+                (str(file_type or "unknown"), int(count or 0), int(size or 0), int(nodes or 0))
+                for file_type, count, size, nodes in result.all()
+            ]
+
     _writable_fields = {
         "kb_id",
         "parent_id",
@@ -100,6 +248,42 @@ class KnowledgeFileRepository:
                 .limit(min(max(int(limit or 100), 1), 1000))
             )
             return list(result.scalars().all())
+
+    async def search_files(
+        self,
+        *,
+        kb_id: str,
+        filename_query: str | None = None,
+        statuses: set[str] | None = None,
+        offset: int = 0,
+        limit: int = 100,
+        files_only: bool = True,
+    ) -> tuple[list[KnowledgeFile], int]:
+        filters = [KnowledgeFile.kb_id == kb_id]
+        if files_only:
+            filters.append(KnowledgeFile.is_folder.is_(False))
+        if statuses is not None:
+            filters.append(KnowledgeFile.status.in_(statuses))
+
+        normalized_query = (filename_query or "").strip().lower()
+        if normalized_query:
+            escaped_query = normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            filters.append(func.lower(KnowledgeFile.filename).like(f"%{escaped_query}%", escape="\\"))
+
+        normalized_offset = max(int(offset or 0), 0)
+        normalized_limit = min(max(int(limit or 100), 1), 10_000)
+
+        async with pg_manager.get_async_session_context() as session:
+            total_result = await session.execute(select(func.count()).select_from(KnowledgeFile).where(*filters))
+            total = int(total_result.scalar_one() or 0)
+            result = await session.execute(
+                select(KnowledgeFile)
+                .where(*filters)
+                .order_by(KnowledgeFile.updated_at.desc(), KnowledgeFile.file_id.asc())
+                .offset(normalized_offset)
+                .limit(normalized_limit)
+            )
+            return list(result.scalars().all()), total
 
     async def get_filenames_by_file_ids(self, *, kb_id: str, file_ids: list[str]) -> dict[str, str]:
         normalized_ids = [file_id for file_id in file_ids if file_id]
@@ -310,8 +494,10 @@ class KnowledgeFileRepository:
         base_filters = [KnowledgeFile.kb_id == kb_id, parent_condition, KnowledgeFile.filename.is_not(None)]
         if path_prefix:
             base_filters.append(KnowledgeFile.filename.like(self._like_prefix(path_prefix), escape="\\"))
-
-        remainder = func.substr(KnowledgeFile.filename, len(path_prefix) + 1)
+            remainder = func.substr(KnowledgeFile.filename, len(path_prefix) + 1)
+        else:
+            # 根目录直接使用 filename 表达式，匹配部分索引 idx_kf_kb_parent_segment/idx_kf_kb_parent_flat
+            remainder = KnowledgeFile.filename
         immediate_name = remainder.label("filename")
         segment = func.split_part(remainder, "/", 1)
         virtual_path_prefix = (literal(path_prefix) + segment + literal("/")).label("path_prefix")
@@ -329,6 +515,9 @@ class KnowledgeFileRepository:
             KnowledgeFile.created_at.label("created_at"),
             KnowledgeFile.updated_at.label("updated_at"),
             KnowledgeFile.file_size.label("file_size"),
+            KnowledgeFile.chunk_count.label("chunk_count"),
+            KnowledgeFile.token_count.label("token_count"),
+            KnowledgeFile.created_by.label("created_by"),
             KnowledgeFile.is_folder.label("is_folder"),
             KnowledgeFile.parent_id.label("parent_id"),
             KnowledgeFile.path.label("path"),
@@ -348,6 +537,9 @@ class KnowledgeFileRepository:
                 cast(literal(None), DateTime).label("created_at"),
                 cast(literal(None), DateTime).label("updated_at"),
                 literal(0).label("file_size"),
+                literal(0).label("chunk_count"),
+                literal(0).label("token_count"),
+                cast(literal(None), String).label("created_by"),
                 literal(True).label("is_folder"),
                 cast(literal(parent_id), String).label("parent_id"),
                 cast(literal(None), String).label("path"),
@@ -449,6 +641,27 @@ class KnowledgeFileRepository:
             return {str(parent_id): int(count or 0) for parent_id, count in result.all() if parent_id}
 
     async def get_kb_file_stats(self, kb_id: str) -> dict[str, int]:
+        """获取知识库文件统计；结果带短 TTL 缓存，避免高频列表请求反复全表聚合。"""
+        from yuxi.storage.redis import get_async_redis_client
+
+        cache_key = f"yuxi:kb_file_stats:{kb_id}"
+        redis_client = await get_async_redis_client()
+        try:
+            cached = await redis_client.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception as exc:
+            logger.warning(f"Failed to load kb file stats cache {cache_key}: {exc}")
+
+        stats = await self._query_kb_file_stats(kb_id)
+        try:
+            await redis_client.set(cache_key, json.dumps(stats), ex=KB_FILE_STATS_CACHE_TTL)
+        except Exception as exc:
+            logger.warning(f"Failed to store kb file stats cache {cache_key}: {exc}")
+        return stats
+
+    async def _query_kb_file_stats(self, kb_id: str) -> dict[str, int]:
+        """直接查询数据库计算知识库文件统计。"""
         non_folder = KnowledgeFile.is_folder.is_(False)
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(

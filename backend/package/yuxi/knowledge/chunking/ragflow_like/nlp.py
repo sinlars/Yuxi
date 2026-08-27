@@ -233,11 +233,7 @@ def _get_text(section: str | tuple[str, str]) -> str:
     return (section[0] or "").strip()
 
 
-def remove_contents_table(
-    sections: list[str] | list[tuple[str, str]],
-    eng: bool = False,
-    max_scan_lines: int = 128,
-) -> None:
+def remove_contents_table(sections: list[str] | list[tuple[str, str]], eng: bool = False) -> None:
     i = 0
     while i < len(sections):
         line = re.sub(r"( |　|\u3000)+", "", _get_text(sections[i]).split("@@")[0], flags=re.IGNORECASE)
@@ -249,13 +245,7 @@ def remove_contents_table(
         if i >= len(sections):
             break
 
-        first_entry = re.sub(
-            r"\s*[/／·.…]+\s*[ivxlcdm\d]+\s*$",
-            "",
-            _get_text(sections[i]),
-            flags=re.IGNORECASE,
-        ).strip()
-        prefix = first_entry[:3] if not eng else " ".join(first_entry.split()[:2])
+        prefix = _get_text(sections[i])[:3] if not eng else " ".join(_get_text(sections[i]).split()[:2])
         while not prefix and i < len(sections):
             sections.pop(i)
             if i >= len(sections):
@@ -269,7 +259,7 @@ def remove_contents_table(
         if i >= len(sections):
             break
 
-        for j in range(i, min(i + max(max_scan_lines, 1), len(sections))):
+        for j in range(i, min(i + 128, len(sections))):
             if not re.match(re.escape(prefix), _get_text(sections[j])):
                 continue
             for _ in range(i, j):

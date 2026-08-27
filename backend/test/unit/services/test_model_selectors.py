@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -24,7 +25,12 @@ def _model_info(model_type: str) -> ModelInfo:
     )
 
 
-def _chat_model_info(provider_id: str, model_id: str, provider_type: str = "openai") -> ModelInfo:
+def _chat_model_info(
+    provider_id: str,
+    model_id: str,
+    provider_type: str = "openai",
+    request_body_overrides: dict | None = None,
+) -> ModelInfo:
     return ModelInfo(
         provider_id=provider_id,
         model_id=model_id,
@@ -33,6 +39,7 @@ def _chat_model_info(provider_id: str, model_id: str, provider_type: str = "open
         api_key="test-key",
         base_url="https://example.com/v1",
         provider_type=provider_type,
+        request_body_overrides=request_body_overrides or {},
     )
 
 
@@ -76,17 +83,12 @@ def test_selectors_report_unknown_unconfigured_specs(selector, args):
         selector(**args)
 
 
-def test_resolve_chat_model_spec_prefers_explicit_then_fallback_then_default(monkeypatch):
-    monkeypatch.setattr("yuxi.agents.models.sys_config.default_model", "system-default:model")
-
+def test_resolve_chat_model_spec_prefers_explicit_then_fallback():
     assert resolve_chat_model_spec(" explicit:model ", fallback="fallback:model") == "explicit:model"
     assert resolve_chat_model_spec("", fallback=" fallback:model ") == "fallback:model"
-    assert resolve_chat_model_spec(None, fallback="") == "system-default:model"
 
 
-def test_resolve_chat_model_spec_rejects_all_empty(monkeypatch):
-    monkeypatch.setattr("yuxi.agents.models.sys_config.default_model", "")
-
+def test_resolve_chat_model_spec_rejects_all_empty():
     with pytest.raises(ValueError, match="model spec 不能为空"):
         resolve_chat_model_spec("", fallback=None)
 
@@ -177,6 +179,10 @@ def test_load_chat_model_uses_toolcall_chunk_fix_for_openai_compatible(monkeypat
     # 不再按 provider 禁用流式，改用归一化子类规避 v3 流式累积丢 tool_call 字段的缺陷
     assert isinstance(model, _ToolCallChunkFixChatOpenAI)
     assert model.disable_streaming is False
+    assert model.metadata["yuxi_provider_id"] == "siliconflow-cn"
+    assert model.metadata["yuxi_provider_type"] == "openai"
+    assert model.metadata["yuxi_model_id"] == "deepseek-ai/DeepSeek-V4-Flash"
+    assert model.metadata["yuxi_model_spec"] == "siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash"
 
 
 def test_load_chat_model_keeps_non_siliconflow_openai_streaming(monkeypatch):
@@ -194,6 +200,64 @@ def test_load_chat_model_keeps_non_siliconflow_openai_streaming(monkeypatch):
 
     assert model.disable_streaming is False
     assert explicit.disable_streaming is True
+
+
+def test_load_chat_model_merges_request_body_overrides_into_extra_body(monkeypatch):
+    captured_body = {}
+
+    monkeypatch.setattr(
+        "yuxi.agents.models.model_cache.get_model_info",
+        lambda spec: (
+            _chat_model_info(
+                "siliconflow-cn",
+                "Qwen/Qwen3-8B",
+                request_body_overrides={
+                    "enable_thinking": False,
+                    "reasoning_effort": "high",
+                    "thinking_budget": 1024,
+                },
+            )
+            if spec == "siliconflow-cn:Qwen/Qwen3-8B"
+            else None
+        ),
+    )
+
+    def capture_request(request: httpx.Request) -> httpx.Response:
+        captured_body.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "Qwen/Qwen3-8B",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(capture_request)) as http_client:
+        model = load_chat_model(
+            "siliconflow-cn:Qwen/Qwen3-8B",
+            reasoning_effort="low",
+            temperature=0.1,
+            extra_body={"thinking_budget": 256, "caller_only": True},
+            http_client=http_client,
+        )
+        response = model.invoke("hello")
+
+    assert response.content == "ok"
+    assert captured_body["temperature"] == 0.1
+    assert captured_body["caller_only"] is True
+    assert captured_body["enable_thinking"] is False
+    assert captured_body["reasoning_effort"] == "high"
+    assert captured_body["thinking_budget"] == 1024
 
 
 @pytest.mark.asyncio

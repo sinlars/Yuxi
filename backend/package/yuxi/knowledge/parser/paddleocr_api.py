@@ -17,7 +17,6 @@ from yuxi.storage.minio import get_minio_client
 from yuxi.utils import logger
 
 DEFAULT_PADDLEOCR_API_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
-PADDLEOCR_SUPPORTED_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
 
 
 class PaddleOCRAPIParser(BaseDocumentProcessor):
@@ -25,17 +24,13 @@ class PaddleOCRAPIParser(BaseDocumentProcessor):
 
     model = ""
     service_name = ""
+    display_name = ""
     default_optional_payload: dict[str, bool] = {}
+    supported_extensions = [".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]
 
     def __init__(self, api_token: str | None = None, api_url: str | None = None):
         self.api_token = api_token or os.getenv("PADDLEOCR_API_TOKEN")
         self.api_url = (api_url or os.getenv("PADDLEOCR_API_URL") or DEFAULT_PADDLEOCR_API_URL).rstrip("/")
-
-    def get_service_name(self) -> str:
-        return self.service_name
-
-    def get_supported_extensions(self) -> list[str]:
-        return PADDLEOCR_SUPPORTED_EXTENSIONS
 
     def check_health(self) -> dict[str, Any]:
         if not self.api_token:
@@ -109,6 +104,9 @@ class PaddleOCRAPIParser(BaseDocumentProcessor):
             for key in payload:
                 if key in overrides:
                     payload[key] = overrides[key]
+        for key in payload:
+            if key in params:
+                payload[key] = params[key]
         return payload
 
     def _submit_job(self, file_path: str, params: dict[str, Any]) -> str:
@@ -226,7 +224,7 @@ class PaddleOCRAPIParser(BaseDocumentProcessor):
                 "image_download_failed",
             )
 
-        image_bucket = params.get("image_bucket") or "public"
+        image_bucket = params.get("image_bucket") or get_minio_client().KB_BUCKETS["images"]
         image_prefix = str(params.get("image_prefix") or "unknown/kb-images").strip("/") or "unknown/kb-images"
         filename = Path(image_path).name or "paddleocr_image"
         suffix = Path(filename).suffix
@@ -238,12 +236,14 @@ class PaddleOCRAPIParser(BaseDocumentProcessor):
         object_name = f"{image_prefix}/{int(time.time() * 1000000)}_{filename}"
         minio_client = get_minio_client()
         minio_client.ensure_bucket_exists(image_bucket)
-        upload_result = minio_client.upload_file(
+        minio_client.upload_file(
             bucket_name=image_bucket,
             object_name=object_name,
             data=response.content,
         )
-        return upload_result.url
+        from yuxi.knowledge.utils.kb_utils import build_kb_image_proxy_url
+
+        return build_kb_image_proxy_url(object_name)
 
 
 class PaddleOCRVLParser(PaddleOCRAPIParser):
@@ -251,6 +251,7 @@ class PaddleOCRVLParser(PaddleOCRAPIParser):
 
     model = "PaddleOCR-VL-1.6"
     service_name = "paddleocr_vl_1_6"
+    display_name = "PaddleOCR-VL-1.6"
     default_optional_payload = {
         "useDocOrientationClassify": False,
         "useDocUnwarping": False,
@@ -286,6 +287,7 @@ class PaddleOCRPPOCRv6Parser(PaddleOCRAPIParser):
 
     model = "PP-OCRv6"
     service_name = "paddleocr_pp_ocrv6"
+    display_name = "PP-OCRv6"
     default_optional_payload = {
         "useDocOrientationClassify": False,
         "useDocUnwarping": False,

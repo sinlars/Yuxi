@@ -17,8 +17,8 @@ class ReadOnlyConnectors(KnowledgeBase):
     def _readonly_error() -> ValueError:
         return ValueError("只读检索连接器不支持该操作")
 
-    async def _create_kb_instance(self, kb_id: str, config: dict) -> Any:
-        del kb_id, config
+    async def _create_kb_instance(self, kb_id: str, embedding_model_spec: str | None) -> Any:
+        del kb_id, embedding_model_spec
         return None
 
     async def _initialize_kb_instance(self, instance: Any) -> None:
@@ -26,20 +26,53 @@ class ReadOnlyConnectors(KnowledgeBase):
         return None
 
     async def add_file_record(
-        self, kb_id: str, item: str, params: dict | None = None, operator_id: str | None = None
+        self,
+        kb_id: str,
+        item: str,
+        params: dict | None = None,
+        operator_id: str | None = None,
+        *,
+        additional_params: dict[str, Any],
+    ) -> dict:
+        del kb_id, item, params, operator_id, additional_params
+        raise self._readonly_error()
+
+    async def parse_file(
+        self,
+        kb_id: str,
+        file_id: str,
+        operator_id: str | None = None,
+        *,
+        additional_params: dict[str, Any],
+    ) -> dict:
+        del kb_id, file_id, operator_id, additional_params
+        raise self._readonly_error()
+
+    async def update_file_params(
+        self,
+        kb_id: str,
+        file_id: str,
+        params: dict,
+        operator_id: str | None = None,
+        *,
+        additional_params: dict[str, Any],
+    ) -> None:
+        del kb_id, file_id, params, operator_id, additional_params
+        raise self._readonly_error()
+
+    async def create_folder(
+        self,
+        kb_id: str,
+        folder_name: str,
+        parent_id: str | None = None,
+        operator_id: str | None = None,
     ) -> dict:
         raise self._readonly_error()
 
-    async def parse_file(self, kb_id: str, file_id: str, operator_id: str | None = None) -> dict:
-        raise self._readonly_error()
-
-    async def update_file_params(self, kb_id: str, file_id: str, params: dict, operator_id: str | None = None) -> None:
-        raise self._readonly_error()
-
-    async def create_folder(self, kb_id: str, folder_name: str, parent_id: str | None = None) -> dict:
-        raise self._readonly_error()
-
     async def move_file(self, kb_id: str, file_id: str, new_parent_id: str | None) -> dict:
+        raise self._readonly_error()
+
+    async def rename_folder(self, kb_id: str, folder_id: str, folder_name: str) -> dict:
         raise self._readonly_error()
 
     async def delete_folder(self, kb_id: str, folder_id: str) -> None:
@@ -51,10 +84,23 @@ class ReadOnlyConnectors(KnowledgeBase):
         file_id: str,
         operator_id: str | None = None,
         params: dict | None = None,
+        *,
+        embedding_model_spec: str | None,
+        additional_params: dict[str, Any],
     ) -> dict:
+        del kb_id, file_id, operator_id, params, embedding_model_spec, additional_params
         raise self._readonly_error()
 
-    async def update_content(self, kb_id: str, file_ids: list[str], params: dict | None = None) -> list[dict]:
+    async def update_content(
+        self,
+        kb_id: str,
+        file_ids: list[str],
+        params: dict | None = None,
+        *,
+        embedding_model_spec: str | None,
+        additional_params: dict[str, Any],
+    ) -> list[dict]:
+        del kb_id, file_ids, params, embedding_model_spec, additional_params
         raise self._readonly_error()
 
     async def delete_file(self, kb_id: str, file_id: str) -> None:
@@ -96,10 +142,6 @@ class ReadOnlyConnectors(KnowledgeBase):
     ) -> dict:
         del kb_id, parent_id, recursive, files_only
         raise ValueError("只读检索连接器不支持文件树预览")
-
-    async def read_file_preview(self, kb_id: str, file_id: str) -> dict:
-        del kb_id, file_id
-        raise ValueError("只读检索连接器不支持文件预览")
 
     async def get_file_download(self, kb_id: str, file_id: str, variant: str = "original") -> dict:
         del kb_id, file_id, variant

@@ -4,6 +4,7 @@
 # This script helps set up the environment for the Yuxi project
 
 set -e
+umask 077
 
 generate_hex() {
     local length="$1"
@@ -35,6 +36,100 @@ set_env_value() {
     fi
 }
 
+get_env_value() {
+    local name="$1"
+    awk -v name="$name" '
+        index($0, name "=") == 1 && !found {
+            print substr($0, length(name) + 2)
+            found = 1
+        }
+    ' .env
+}
+
+trim_whitespace() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
+security_secret_is_valid() {
+    local value="$1"
+    shift
+    local trimmed
+    trimmed=$(trim_whitespace "$value")
+    if [ "$value" != "$trimmed" ] || [ "${#value}" -lt 32 ]; then
+        return 1
+    fi
+    case "$value" in
+        \"*|*\"|\'*|*\') return 1 ;;
+    esac
+    local other
+    for other in "$@"; do
+        if [ -n "$other" ] && [ "$value" = "$other" ]; then
+            return 1
+        fi
+    done
+}
+
+read_security_secret() {
+    local name="$1"
+    shift
+    local value
+    while true; do
+        read -s -p "Please enter your ${name} (press Enter to auto-generate): " value
+        echo ""
+        if [ -z "$value" ]; then
+            value=$(generate_hex 32)
+            echo "Generated ${name} and saved it to .env."
+        fi
+        if security_secret_is_valid "$value" "$@"; then
+            SECURITY_SECRET_VALUE="$value"
+            return
+        fi
+        echo "❌ ${name} must contain at least 32 non-whitespace characters and must not reuse another security secret."
+    done
+}
+
+ensure_security_secret() {
+    local name="$1"
+    shift
+    local current
+    current=$(get_env_value "$name")
+    local other_values=()
+    local other_name
+    for other_name in "$@"; do
+        other_values+=("$(get_env_value "$other_name")")
+    done
+    if security_secret_is_valid "$current" "${other_values[@]}"; then
+        return
+    fi
+
+    echo "${name} is missing, too short, or reuses another security secret in .env."
+    read_security_secret "$name" "${other_values[@]}"
+    set_env_value "$name" "$SECURITY_SECRET_VALUE"
+}
+
+validate_security_env() {
+    local jwt_secret api_key_secret sandbox_secret
+    jwt_secret=$(get_env_value "JWT_SECRET_KEY")
+    api_key_secret=$(get_env_value "API_KEY_DERIVATION_SECRET")
+    sandbox_secret=$(get_env_value "SANDBOX_PROVISIONER_TOKEN")
+
+    security_secret_is_valid "$jwt_secret" || {
+        echo "JWT_SECRET_KEY must contain at least 32 non-whitespace characters." >&2
+        return 1
+    }
+    security_secret_is_valid "$api_key_secret" "$jwt_secret" || {
+        echo "API_KEY_DERIVATION_SECRET must be at least 32 characters and independent from JWT_SECRET_KEY." >&2
+        return 1
+    }
+    security_secret_is_valid "$sandbox_secret" "$jwt_secret" "$api_key_secret" || {
+        echo "SANDBOX_PROVISIONER_TOKEN must be at least 32 characters and independent from other security secrets." >&2
+        return 1
+    }
+}
+
 ensure_required_api_env() {
     if grep -Eq '^SILICONFLOW_API_KEY=.+' .env; then
         return
@@ -53,17 +148,8 @@ ensure_required_api_env() {
 }
 
 ensure_jwt_env() {
-    if ! grep -Eq '^JWT_SECRET_KEY=.+' .env; then
-        echo "JWT_SECRET_KEY is missing in .env."
-        read -s -p "Please enter your JWT_SECRET_KEY (press Enter to auto-generate): " JWT_SECRET_KEY
-        echo ""
-        if [ -z "$JWT_SECRET_KEY" ]; then
-            JWT_SECRET_KEY=$(generate_hex 32)
-            echo "Generated JWT_SECRET_KEY and saved it to .env."
-        fi
-
-        set_env_value "JWT_SECRET_KEY" "$JWT_SECRET_KEY"
-    fi
+    ensure_security_secret "JWT_SECRET_KEY"
+    ensure_security_secret "API_KEY_DERIVATION_SECRET" "JWT_SECRET_KEY"
 
     if ! grep -Eq '^YUXI_INSTANCE_ID=.+' .env; then
         echo "YUXI_INSTANCE_ID is missing in .env."
@@ -78,20 +164,17 @@ ensure_jwt_env() {
 }
 
 ensure_sandbox_env() {
-    if grep -Eq '^SANDBOX_PROVISIONER_TOKEN=.+' .env; then
-        return
-    fi
-
-    echo "SANDBOX_PROVISIONER_TOKEN is missing in .env."
-    read -s -p "Please enter your SANDBOX_PROVISIONER_TOKEN (press Enter to auto-generate): " SANDBOX_PROVISIONER_TOKEN
-    echo ""
-    if [ -z "$SANDBOX_PROVISIONER_TOKEN" ]; then
-        SANDBOX_PROVISIONER_TOKEN=$(generate_hex 32)
-        echo "Generated SANDBOX_PROVISIONER_TOKEN and saved it to .env."
-    fi
-
-    set_env_value "SANDBOX_PROVISIONER_TOKEN" "$SANDBOX_PROVISIONER_TOKEN"
+    ensure_security_secret "SANDBOX_PROVISIONER_TOKEN" "JWT_SECRET_KEY" "API_KEY_DERIVATION_SECRET"
 }
+
+if [ "${1:-}" = "--validate-security-env" ]; then
+    if [ ! -f ".env" ]; then
+        echo ".env does not exist" >&2
+        exit 1
+    fi
+    validate_security_env
+    exit 0
+fi
 
 skip_existing_image() {
     local image="$1"
@@ -113,6 +196,8 @@ if [ -f ".env" ]; then
     ensure_required_api_env
     ensure_jwt_env
     ensure_sandbox_env
+    validate_security_env
+    chmod 600 .env
 else
     echo "📝 .env file not found. Let's set up your environment variables."
     echo ""
@@ -130,20 +215,36 @@ else
         fi
     done
 
-    # Get TAVILY_API_KEY (optional)
+    # Get Web Search Provider and API Key (optional)
     echo ""
-    echo "🔍 Tavily API Key (optional) - for search service"
-    echo "Get your API key from: https://app.tavily.com/"
-    read -p "Please enter your TAVILY_API_KEY (press Enter to skip): " TAVILY_API_KEY
+    echo "🔍 Web Search Provider (optional)"
+    echo "1) doubao (Doubao Custom Search)"
+    echo "2) tavily (Tavily Search)"
+    read -p "Please select web search provider (1 for doubao, 2 for tavily, press Enter to skip): " SEARCH_CHOICE
+
+    WEB_SEARCH_PROVIDER=""
+    DOUBAO_SEARCH_API_KEY=""
+    TAVILY_API_KEY=""
+
+    if [ "$SEARCH_CHOICE" = "1" ] || [ "$SEARCH_CHOICE" = "doubao" ]; then
+        WEB_SEARCH_PROVIDER="doubao"
+        echo "Get your Doubao API Key from Volcengine Console https://console.volcengine.com/search-infinity/api-key"
+        read -s -p "Please enter your DOUBAO_SEARCH_API_KEY: " DOUBAO_SEARCH_API_KEY
+        echo ""
+    elif [ "$SEARCH_CHOICE" = "2" ] || [ "$SEARCH_CHOICE" = "tavily" ]; then
+        WEB_SEARCH_PROVIDER="tavily"
+        echo "Get your Tavily API key from: https://app.tavily.com/"
+        read -s -p "Please enter your TAVILY_API_KEY: " TAVILY_API_KEY
+        echo ""
+    fi
 
     echo ""
     echo "JWT security settings"
-    read -s -p "Please enter your JWT_SECRET_KEY (press Enter to auto-generate): " JWT_SECRET_KEY
-    echo ""
-    if [ -z "$JWT_SECRET_KEY" ]; then
-        JWT_SECRET_KEY=$(generate_hex 32)
-        echo "Generated JWT_SECRET_KEY and saved it to .env."
-    fi
+    read_security_secret "JWT_SECRET_KEY"
+    JWT_SECRET_KEY="$SECURITY_SECRET_VALUE"
+
+    read_security_secret "API_KEY_DERIVATION_SECRET" "$JWT_SECRET_KEY"
+    API_KEY_DERIVATION_SECRET="$SECURITY_SECRET_VALUE"
 
     read -p "Please enter your YUXI_INSTANCE_ID (press Enter to auto-generate): " YUXI_INSTANCE_ID
     if [ -z "$YUXI_INSTANCE_ID" ]; then
@@ -151,21 +252,23 @@ else
         echo "Generated YUXI_INSTANCE_ID and saved it to .env."
     fi
 
-    read -s -p "Please enter your SANDBOX_PROVISIONER_TOKEN (press Enter to auto-generate): " SANDBOX_PROVISIONER_TOKEN
-    echo ""
-    if [ -z "$SANDBOX_PROVISIONER_TOKEN" ]; then
-        SANDBOX_PROVISIONER_TOKEN=$(generate_hex 32)
-        echo "Generated SANDBOX_PROVISIONER_TOKEN and saved it to .env."
-    fi
+    read_security_secret "SANDBOX_PROVISIONER_TOKEN" "$JWT_SECRET_KEY" "$API_KEY_DERIVATION_SECRET"
+    SANDBOX_PROVISIONER_TOKEN="$SECURITY_SECRET_VALUE"
 
     # Create .env file
     cat > .env << EOF
 # SiliconFlow API Key (required)
 SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY}
 
-# Tavily API Key (optional - for search service)
+# Web Search Provider settings
 EOF
 
+    if [ -n "$WEB_SEARCH_PROVIDER" ]; then
+        echo "WEB_SEARCH_PROVIDER=${WEB_SEARCH_PROVIDER}" >> .env
+    fi
+    if [ -n "$DOUBAO_SEARCH_API_KEY" ]; then
+        echo "DOUBAO_SEARCH_API_KEY=${DOUBAO_SEARCH_API_KEY}" >> .env
+    fi
     if [ -n "$TAVILY_API_KEY" ]; then
         echo "TAVILY_API_KEY=${TAVILY_API_KEY}" >> .env
     fi
@@ -174,10 +277,13 @@ EOF
 
 # JWT security settings
 JWT_SECRET_KEY=${JWT_SECRET_KEY}
+API_KEY_DERIVATION_SECRET=${API_KEY_DERIVATION_SECRET}
 YUXI_INSTANCE_ID=${YUXI_INSTANCE_ID}
 SANDBOX_PROVISIONER_TOKEN=${SANDBOX_PROVISIONER_TOKEN}
 EOF
 
+    validate_security_env
+    chmod 600 .env
     echo "✅ .env file created successfully!"
 fi
 
@@ -191,13 +297,13 @@ images=(
     "node:24-slim"
     "node:24-alpine"
     "milvusdb/milvus:v2.5.6"
-    "neo4j:5.26"
+    "neo4j:5.26.29"
     "minio/minio:RELEASE.2023-03-20T20-16-18Z"
-    "ghcr.io/astral-sh/uv:0.11.26"
+    "ghcr.io/astral-sh/uv:0.12.6"
     "nginx:alpine"
     "quay.io/coreos/etcd:v3.5.5"
     "postgres:16"
-    "redis:7-alpine"
+    "redis:7.4.10-alpine"
 )
 
 # Pull each image

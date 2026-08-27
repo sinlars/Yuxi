@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed, provide, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, provide, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { GithubOutlined } from '@ant-design/icons-vue'
 import {
@@ -7,12 +7,12 @@ import {
   ClipboardList,
   LibraryBig,
   Box,
-  FolderKanban,
-  PanelLeftClose,
+  HardDrive,
+  PanelLeft,
   PanelLeftOpen,
   MessageCirclePlus,
   Search
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 import { useConfigStore } from '@/stores/config'
 import { useAgentStore } from '@/stores/agent'
@@ -20,15 +20,16 @@ import { useChatThreadsStore } from '@/stores/chatThreads'
 import { useChatUIStore } from '@/stores/chatUI'
 import { useDatabaseStore } from '@/stores/database'
 import { useInfoStore } from '@/stores/info'
+import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
 import { useTaskerStore } from '@/stores/tasker'
 import { useUserStore } from '@/stores/user'
 import { storeToRefs } from 'pinia'
 import UserInfoComponent from '@/components/UserInfoComponent.vue'
-import DebugComponent from '@/components/DebugComponent.vue'
 import TaskCenterDrawer from '@/components/TaskCenterDrawer.vue'
 import SettingsModal from '@/components/SettingsModal.vue'
 import ConversationNavSection from '@/components/ConversationNavSection.vue'
-import ConversationSearchModal from '@/components/ConversationSearchModal.vue'
+import GlobalSearchModal from '@/components/GlobalSearchModal.vue'
+import { searchWorkspaceFiles } from '@/apis/workspace_api'
 
 const configStore = useConfigStore()
 const agentStore = useAgentStore()
@@ -36,18 +37,17 @@ const chatThreadsStore = useChatThreadsStore()
 const chatUIStore = useChatUIStore()
 const databaseStore = useDatabaseStore()
 const infoStore = useInfoStore()
+const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
 const taskerStore = useTaskerStore()
 const userStore = useUserStore()
 const { activeCount: activeCountRef, isDrawerOpen } = storeToRefs(taskerStore)
-const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
+const { knowledgeEnabled } = storeToRefs(runtimeCapabilitiesStore)
+const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads, threadCreationInFlight } =
   storeToRefs(chatThreadsStore)
 
 // Add state for GitHub stars
 const githubStars = ref(0)
 const isLoadingStars = ref(false)
-
-// Add state for debug modal
-const showDebugModal = ref(false)
 
 // Add state for settings modal
 const showSettingsModal = ref(false)
@@ -62,11 +62,6 @@ const openSettingsModal = (tab) => {
   showSettingsModal.value = true
 }
 
-// Handle debug modal close
-const handleDebugModalClose = () => {
-  showDebugModal.value = false
-}
-
 const getRemoteConfig = async () => {
   try {
     await configStore.refreshConfig()
@@ -76,6 +71,8 @@ const getRemoteConfig = async () => {
 }
 
 const getRemoteDatabase = async () => {
+  await runtimeCapabilitiesStore.ensureLoaded()
+  if (!knowledgeEnabled.value) return
   try {
     await databaseStore.loadDatabases()
   } catch (error) {
@@ -98,7 +95,18 @@ const fetchGithubStars = async () => {
   }
 }
 
+const handleGlobalKeydown = (e) => {
+  // Ctrl+Shift+D or Cmd+Shift+D: Toggle Debug Modal for SuperAdmin
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+    if (userStore.isSuperAdmin) {
+      e.preventDefault()
+      infoStore.showDebugModal = !infoStore.showDebugModal
+    }
+  }
+}
+
 onMounted(async () => {
+  window.addEventListener('keydown', handleGlobalKeydown)
   // 加载信息配置与知识库数据无依赖，可并行
   await Promise.all([infoStore.loadInfoConfig(), getRemoteDatabase()])
   await initAgentNavigation()
@@ -107,6 +115,32 @@ onMounted(async () => {
   if (userStore.isAdmin) {
     taskerStore.loadTasks()
     fetchGithubStars() // Fetch GitHub stars on mount
+  }
+  startThreadStatusSync()
+})
+
+// 低频刷新侧边栏线程状态，让后台线程完成时也能从 loading 转为 ready/done。
+const THREAD_STATUS_SYNC_INTERVAL_MS = 12 * 1000
+let threadStatusSyncTimer = null
+
+const startThreadStatusSync = () => {
+  if (threadStatusSyncTimer) return
+  threadStatusSyncTimer = setInterval(() => {
+    if (
+      sidebarCollapsed.value ||
+      (typeof document !== 'undefined' && document.visibilityState !== 'visible')
+    ) {
+      return
+    }
+    void chatThreadsStore.syncThreadStatuses()
+  }, THREAD_STATUS_SYNC_INTERVAL_MS)
+}
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown)
+  if (threadStatusSyncTimer) {
+    clearInterval(threadStatusSyncTimer)
+    threadStatusSyncTimer = null
   }
 })
 
@@ -125,7 +159,7 @@ const organizationName = computed(() => {
 const mainList = computed(() => {
   const items = [
     {
-      name: '创建新对话',
+      name: '新建对话',
       path: '/agent',
       icon: MessageCirclePlus,
       activeIcon: MessageCirclePlus,
@@ -135,25 +169,25 @@ const mainList = computed(() => {
   ]
 
   items.push({
-    name: '工作区',
-    path: '/workspace',
-    icon: FolderKanban,
-    activeIcon: FolderKanban
+    name: '智能体',
+    path: '/agent-manage',
+    icon: Box,
+    activeIcon: Box
   })
 
   items.push({
-    name: '智能体扩展',
+    name: '个人空间',
+    path: '/workspace',
+    icon: HardDrive,
+    activeIcon: HardDrive
+  })
+
+  items.push({
+    name: knowledgeEnabled.value ? '知识库 · 技能' : '技能',
     path: '/extensions',
     activePaths: ['/extensions'],
     icon: LibraryBig,
     activeIcon: LibraryBig
-  })
-
-  items.push({
-    name: '智能体管理',
-    path: '/model-manage',
-    icon: Box,
-    activeIcon: Box
   })
 
   if (userStore.isSuperAdmin) {
@@ -204,7 +238,7 @@ const initAgentNavigation = async () => {
 
 const handleSelectChat = (threadId) => {
   if (!threadId) return
-  chatThreadsStore.setCurrentThreadId(threadId)
+  if (!chatThreadsStore.setCurrentThreadId(threadId)) return
   router.push({ name: 'AgentCompWithThreadId', params: { thread_id: threadId } })
 }
 
@@ -219,8 +253,16 @@ const handleSearchSelectThread = (thread) => {
 }
 
 const handleCreateConversationFromSearch = () => {
-  chatThreadsStore.setCurrentThreadId(null)
+  if (!chatThreadsStore.setCurrentThreadId(null)) return
   router.push({ name: 'AgentComp' })
+}
+
+const searchWorkspace = (query) => searchWorkspaceFiles(query)
+
+// 侧边栏搜索到工作区文件后跳转到工作区并打开对应文件
+const handleSearchSelectFile = (entry) => {
+  if (!entry?.path) return
+  router.push({ name: 'WorkspaceComp', query: { open: entry.path } })
 }
 
 const handleDeleteChat = async (threadId) => {
@@ -261,6 +303,7 @@ watch(
   () => [route.path, route.params.thread_id],
   () => {
     if (!route.path.startsWith('/agent')) return
+    if (threadCreationInFlight.value) return
     const threadId = typeof route.params.thread_id === 'string' ? route.params.thread_id : null
     chatThreadsStore.setCurrentThreadId(threadId)
   },
@@ -291,15 +334,25 @@ provide('settingsModal', {
           <img :src="infoStore.organization.avatar" class="brand-avatar brand-avatar-image" />
           <PanelLeftOpen class="brand-expand-icon" size="20" />
         </button>
-        <button
-          v-if="!sidebarCollapsed"
-          type="button"
-          class="sidebar-toggle"
-          aria-label="折叠侧边栏"
-          @click="toggleSidebar"
-        >
-          <PanelLeftClose size="18" />
-        </button>
+        <div v-if="!sidebarCollapsed" class="sidebar-header-actions" aria-label="侧边栏操作">
+          <button
+            type="button"
+            class="sidebar-header-action"
+            :class="{ active: conversationSearchOpen }"
+            aria-label="搜索"
+            @click="openConversationSearch"
+          >
+            <Search size="17" />
+          </button>
+          <button
+            type="button"
+            class="sidebar-header-action"
+            aria-label="折叠侧边栏"
+            @click="toggleSidebar"
+          >
+            <PanelLeft size="17" />
+          </button>
+        </div>
       </div>
       <div class="nav">
         <RouterLink
@@ -324,16 +377,16 @@ provide('settingsModal', {
         </RouterLink>
 
         <button
+          v-if="sidebarCollapsed"
           type="button"
           class="nav-item"
           :class="{ active: conversationSearchOpen }"
+          aria-label="搜索"
           @click.stop="openConversationSearch"
         >
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
-            <template #title>搜索对话</template>
+          <a-tooltip placement="right" title="搜索">
             <Search class="icon" size="18" />
           </a-tooltip>
-          <span class="nav-text">搜索对话</span>
         </button>
 
         <RouterLink
@@ -419,27 +472,19 @@ provide('settingsModal', {
       <component :is="Component" v-else />
     </router-view>
 
-    <ConversationSearchModal
+    <GlobalSearchModal
       v-model:open="conversationSearchOpen"
+      :modes="['conversation', 'file']"
+      default-mode="conversation"
       :recent-threads="threads"
+      :file-search="searchWorkspace"
+      file-placeholder="搜索个人空间文件..."
       @select-thread="handleSearchSelectThread"
       @create-thread="handleCreateConversationFromSearch"
       @thread-found="handleSearchThreadFound"
+      @select-file="handleSearchSelectFile"
     />
 
-    <!-- Debug Modal -->
-    <a-modal
-      v-model:open="showDebugModal"
-      title="调试面板"
-      width="90%"
-      :footer="null"
-      @cancel="handleDebugModalClose"
-      :maskClosable="true"
-      :destroyOnClose="true"
-      class="debug-modal"
-    >
-      <DebugComponent />
-    </a-modal>
     <TaskCenterDrawer v-if="userStore.isAdmin" />
     <SettingsModal
       v-model:visible="showSettingsModal"
@@ -518,7 +563,7 @@ div.header,
     justify-content: flex-start;
     align-items: stretch;
     position: relative;
-    gap: 4px;
+    gap: 2px;
   }
 
   .sidebar-conversations {
@@ -581,15 +626,22 @@ div.header,
     white-space: nowrap;
   }
 
-  .sidebar-toggle {
+  .sidebar-header-actions {
     display: inline-flex;
-    flex: 0 0 32px;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .sidebar-header-action {
+    display: inline-flex;
+    flex: 0 0 30px;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
-    border: 1px solid transparent;
-    border-radius: 8px;
+    width: 30px;
+    height: 30px;
+    border: 0;
+    border-radius: 7px;
     background: transparent;
     color: var(--gray-600);
     cursor: pointer;
@@ -600,10 +652,13 @@ div.header,
 
     &:hover,
     &:focus-visible {
-      border-color: var(--main-50);
       background: var(--main-20);
       color: var(--main-color);
       outline: none;
+    }
+    &.active {
+      background: var(--main-20);
+      color: var(--main-color);
     }
   }
 
@@ -657,13 +712,6 @@ div.header,
       outline: none;
     }
 
-    &.active {
-      border-color: transparent;
-      background-color: color-mix(in srgb, var(--main-color) 6%, var(--gray-0));
-      font-weight: 600;
-      color: var(--main-color);
-    }
-
     &.primary-action {
       margin-bottom: 8px;
       border-color: var(--gray-150);
@@ -674,7 +722,7 @@ div.header,
       &:hover {
         border-color: var(--gray-200);
         background-color: var(--gray-0);
-        color: var(--main-color);
+        color: var(--gray-900);
         box-shadow: 0 3px 4px rgba(0, 10, 20, 0.07);
       }
     }
@@ -685,8 +733,15 @@ div.header,
 
     &:hover {
       border-color: transparent;
-      background-color: var(--main-20);
-      color: var(--main-color);
+      background-color: var(--gray-50);
+      color: var(--gray-900);
+    }
+
+    &.active {
+      border-color: transparent;
+      background-color: color-mix(in srgb, var(--gray-100) 6%, var(--gray-100));
+      font-weight: 600;
+      color: var(--gray-1000);
     }
 
     &.github {

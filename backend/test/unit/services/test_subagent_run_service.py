@@ -68,7 +68,13 @@ def _agent(slug: str = "worker"):
 
 
 def _parent_run():
-    return SimpleNamespace(id="parent-run", conversation_thread_id="parent-thread", conversation_id=10, run_type="chat")
+    return SimpleNamespace(
+        id="parent-run",
+        conversation_thread_id="parent-thread",
+        runtime_scope_id="parent-thread",
+        conversation_id=10,
+        run_type="chat",
+    )
 
 
 def _relation(
@@ -111,7 +117,19 @@ def _patch_repos(
 ):
     captured = captured if captured is not None else {}
     parent_run = parent_run or _parent_run()
-    child_conversation = child_conversation or SimpleNamespace(id=20, uid="user-1", agent_id="worker", status="active")
+    child_conversation = child_conversation or SimpleNamespace(
+        id=20,
+        uid="user-1",
+        agent_id="worker",
+        status="active",
+        project_id="project-1",
+    )
+    parent_conversation = SimpleNamespace(
+        id=10,
+        uid="user-1",
+        thread_id="parent-thread",
+        project_id="project-1",
+    )
 
     class RunRepo:
         def __init__(self, _db):
@@ -121,9 +139,12 @@ def _patch_repos(
             assert uid == "user-1"
             return {"parent-run": parent_run, "child-run": child_run}.get(run_id)
 
-        async def get_subagent_run_for_creator(self, *, uid: str, created_by_run_id: str, run_id: str):
+        async def lock_run_for_user(self, run_id: str, uid: str):
+            return await self.get_run_for_user(run_id, uid)
+
+        async def get_subagent_run_with_creator(self, *, uid: str, created_by_run_id: str, run_id: str):
             assert uid == "user-1"
-            captured["get_subagent_run_for_creator"] = {
+            captured["get_subagent_run_with_creator"] = {
                 "uid": uid,
                 "created_by_run_id": created_by_run_id,
                 "run_id": run_id,
@@ -141,7 +162,7 @@ def _patch_repos(
                 return None
             if relation_by_id.child_thread_id != run.conversation_thread_id:
                 return None
-            return run
+            return creator_run, run
 
     class ConvRepo:
         def __init__(self, _db):
@@ -153,6 +174,16 @@ def _patch_repos(
                 return existing_child_conversation
             return None
 
+        async def lock_conversation_by_thread_id(self, thread_id: str):
+            return await self.get_conversation_by_thread_id(thread_id)
+
+        async def get_conversation_by_id(self, conversation_id: int):
+            if conversation_id == parent_conversation.id:
+                return parent_conversation
+            if conversation_id == child_conversation.id:
+                return child_conversation
+            return None
+
         async def add_conversation(
             self,
             *,
@@ -161,6 +192,7 @@ def _patch_repos(
             title: str,
             thread_id: str,
             metadata: dict,
+            project_id: str,
         ):
             captured["conversation"] = {
                 "uid": uid,
@@ -168,8 +200,10 @@ def _patch_repos(
                 "title": title,
                 "thread_id": thread_id,
                 "metadata": metadata,
+                "project_id": project_id,
             }
             child_conversation.thread_id = thread_id
+            child_conversation.project_id = project_id
             return child_conversation
 
     class ThreadRepo:
@@ -198,6 +232,15 @@ def _patch_repos(
     monkeypatch.setattr(service_module, "ConversationRepository", ConvRepo)
     monkeypatch.setattr(service_module, "SubagentThreadRepository", ThreadRepo)
 
+    async def resolve_binding(*, conversation, uid, db):
+        del uid, db
+        return (
+            "projects/11111111-1111-4111-8111-111111111111",
+            SimpleNamespace(id=conversation.project_id),
+        )
+
+    monkeypatch.setattr(service_module, "resolve_conversation_workdir_binding", resolve_binding)
+
 
 def _patch_run_record_creation(
     monkeypatch: pytest.MonkeyPatch,
@@ -207,6 +250,16 @@ def _patch_run_record_creation(
     active_run=None,
 ):
     db.active_run = active_run
+
+    async def get_system_options(_option, _db=None):
+        return {"default_model": "system-default:model"}
+
+    monkeypatch.setattr(type(agent_run_service.system_options), "get", get_system_options)
+    monkeypatch.setattr(
+        agent_run_service.model_cache,
+        "get_model_info",
+        lambda _spec: SimpleNamespace(model_type="chat"),
+    )
 
     class _FakeContext:
         def __init__(self):
@@ -227,6 +280,9 @@ def _patch_run_record_creation(
         async def get_conversation_by_thread_id(self, thread_id: str):
             del thread_id
             return SimpleNamespace(id=20, uid="user-1", status="subagent", agent_id="worker")
+
+        async def lock_conversation_by_thread_id(self, thread_id: str):
+            return await self.get_conversation_by_thread_id(thread_id)
 
     class AgentRepo:
         def __init__(self, db_session):
@@ -310,7 +366,13 @@ async def test_subagent_run_service_creates_child_relation_run_and_enqueue(monke
     db = _FakeDB()
     captured: dict[str, object] = {}
     enqueued: list[str] = []
-    child_conversation = SimpleNamespace(id=20, uid="user-1", agent_id="worker", status="active")
+    child_conversation = SimpleNamespace(
+        id=20,
+        uid="user-1",
+        agent_id="worker",
+        status="active",
+        project_id="project-1",
+    )
     relation = _relation(child_thread_id="")
 
     _patch_repos(
@@ -341,6 +403,8 @@ async def test_subagent_run_service_creates_child_relation_run_and_enqueue(monke
     assert result.relation.child_thread_id == child_thread_id
     assert result.relation is relation
     assert child_conversation.status == "subagent"
+    assert child_conversation.project_id == "project-1"
+    assert captured["conversation"]["project_id"] == "project-1"
     assert captured["conversation"]["metadata"]["parent_conversation_id"] == 10
     assert captured["relation"] == {
         "uid": "user-1",
@@ -397,25 +461,21 @@ async def test_subagent_run_service_continues_existing_relation(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-async def test_subagent_run_service_rejects_thread_from_another_parent(monkeypatch: pytest.MonkeyPatch):
-    _patch_repos(monkeypatch, existing_relation=_relation(parent_conversation_id=99))
+@pytest.mark.parametrize(
+    ("relation_kwargs", "expected_error"),
+    [
+        ({"parent_conversation_id": 99}, "线程不属于当前对话"),
+        ({"subagent_slug": "other"}, "属于子智能体 other"),
+    ],
+)
+async def test_subagent_run_service_rejects_thread_from_unrelated_relation(
+    monkeypatch: pytest.MonkeyPatch,
+    relation_kwargs,
+    expected_error,
+):
+    _patch_repos(monkeypatch, existing_relation=_relation(**relation_kwargs))
 
-    with pytest.raises(ValueError, match="线程不属于当前对话"):
-        await SubagentRunService(_FakeDB()).start(
-            uid="user-1",
-            created_by_run_id="parent-run",
-            agent_item=_agent(),
-            input_message=build_chat_input_message("continue"),
-            tool_call_id="tool-2",
-            requested_thread_id="child-thread",
-        )
-
-
-@pytest.mark.asyncio
-async def test_subagent_run_service_rejects_thread_from_another_subagent(monkeypatch: pytest.MonkeyPatch):
-    _patch_repos(monkeypatch, existing_relation=_relation(subagent_slug="other"))
-
-    with pytest.raises(ValueError, match="属于子智能体 other"):
+    with pytest.raises(ValueError, match=expected_error):
         await SubagentRunService(_FakeDB()).start(
             uid="user-1",
             created_by_run_id="parent-run",
@@ -474,6 +534,36 @@ async def test_subagent_run_service_rejects_subagent_as_creator(monkeypatch: pyt
         )
 
     assert "relation_lookup_thread_id" not in captured
+    assert "conversation" not in captured
+    assert "relation" not in captured
+
+
+@pytest.mark.asyncio
+async def test_subagent_run_service_rejects_child_creation_after_parent_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+    _patch_repos(
+        monkeypatch,
+        captured=captured,
+        parent_run=SimpleNamespace(
+            id="parent-run",
+            conversation_thread_id="parent-thread",
+            conversation_id=10,
+            run_type="chat",
+            status="completed",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="父运行已结束"):
+        await SubagentRunService(_FakeDB()).start(
+            uid="user-1",
+            created_by_run_id="parent-run",
+            agent_item=_agent(),
+            input_message=build_chat_input_message("late child"),
+            tool_call_id="tool-late",
+        )
+
     assert "conversation" not in captured
     assert "relation" not in captured
 
@@ -549,7 +639,12 @@ async def test_subagent_run_service_translates_busy_run(monkeypatch: pytest.Monk
 async def test_subagent_run_service_create_run_record_persists_subagent_context(monkeypatch: pytest.MonkeyPatch):
     db = _FakeDB()
     _patch_run_record_creation(monkeypatch, db)
-    creator_run = SimpleNamespace(id="parent-run", conversation_id=10, conversation_thread_id="parent-thread")
+    creator_run = SimpleNamespace(
+        id="parent-run",
+        conversation_id=10,
+        conversation_thread_id="parent-thread",
+        input_payload={"tool_approval_mode": "default"},
+    )
     relation = _relation(child_thread_id="child-thread", parent_conversation_id=10, subagent_slug="worker")
 
     run, created = await SubagentRunService(db)._create_run_record(
@@ -560,7 +655,6 @@ async def test_subagent_run_service_create_run_record_persists_subagent_context(
         creator_run=creator_run,
         relation=relation,
         tool_call_id="tool-1",
-        file_thread_id="parent-file-thread",
     )
 
     assert created is True
@@ -570,30 +664,37 @@ async def test_subagent_run_service_create_run_record_persists_subagent_context(
     assert db.added[0].extra_metadata["raw_message"]["type"] == "human"
     assert db.added[0].extra_metadata["raw_message"]["content"] == "delegate this"
     assert db.created_run_kwargs["run_type"] == "subagent"
+    assert db.created_run_kwargs["source"] == "subagent"
+    assert db.created_run_kwargs["channel"] == "internal"
     assert db.created_run_kwargs["created_by_run_id"] == "parent-run"
     assert db.created_run_kwargs["subagent_thread_relation_id"] == 77
     assert db.created_run_kwargs["conversation_thread_id"] == "child-thread"
+    assert db.created_run_kwargs["runtime_scope_id"] == "parent-thread"
     assert db.created_run_kwargs["input_message_id"] == 10
     assert db.created_run_kwargs["input_payload"] == {
         "model_spec": "agent-default-model",
+        "tool_approval_mode": "default",
         "runtime": {
             "tool_call_id": "tool-1",
             "subagent_name": "Worker",
             "parent_thread_id": "parent-thread",
-            "file_thread_id": "parent-file-thread",
-            "skills_thread_id": "child-thread",
         },
     }
     assert db.committed is False
 
 
 @pytest.mark.asyncio
-async def test_subagent_run_service_create_run_record_uses_creator_thread_when_file_thread_missing(
+async def test_subagent_run_service_create_run_record_uses_creator_runtime_scope(
     monkeypatch: pytest.MonkeyPatch,
 ):
     db = _FakeDB()
     _patch_run_record_creation(monkeypatch, db)
-    creator_run = SimpleNamespace(id="parent-run", conversation_id=10, conversation_thread_id="current-parent-thread")
+    creator_run = SimpleNamespace(
+        id="parent-run",
+        conversation_id=10,
+        conversation_thread_id="current-parent-thread",
+        input_payload={"tool_approval_mode": "always_trust"},
+    )
     relation = _relation(child_thread_id="child-thread", parent_conversation_id=10, subagent_slug="worker")
 
     await SubagentRunService(db)._create_run_record(
@@ -604,12 +705,11 @@ async def test_subagent_run_service_create_run_record_uses_creator_thread_when_f
         creator_run=creator_run,
         relation=relation,
         tool_call_id="tool-2",
-        file_thread_id=None,
     )
 
     assert db.created_run_kwargs["created_by_run_id"] == "parent-run"
     assert db.created_run_kwargs["input_payload"]["runtime"]["parent_thread_id"] == "current-parent-thread"
-    assert db.created_run_kwargs["input_payload"]["runtime"]["file_thread_id"] == "current-parent-thread"
+    assert db.created_run_kwargs["input_payload"]["tool_approval_mode"] == "always_trust"
 
 
 @pytest.mark.asyncio
@@ -630,7 +730,6 @@ async def test_subagent_run_service_create_run_record_rejects_non_subagent_defin
             creator_run=creator_run,
             relation=relation,
             tool_call_id="tool-1",
-            file_thread_id="parent-thread",
         )
 
     assert exc.value.status_code == 404
@@ -656,7 +755,6 @@ async def test_subagent_run_service_create_run_record_rejects_relation_parent_mi
             creator_run=creator_run,
             relation=relation,
             tool_call_id="tool-1",
-            file_thread_id="parent-thread",
         )
 
     assert exc.value.status_code == 409

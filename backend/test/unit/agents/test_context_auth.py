@@ -6,6 +6,23 @@ import types
 from dataclasses import dataclass, field
 
 import pytest
+from yuxi.knowledge.read_models import KnowledgeBaseSummary
+
+
+def _knowledge_summary(kb_id: str) -> KnowledgeBaseSummary:
+    return KnowledgeBaseSummary(
+        kb_id=kb_id,
+        name=kb_id,
+        description=None,
+        kb_type="milvus",
+        embedding_model_spec=None,
+        llm_model_spec=None,
+        query_params={},
+        additional_params={},
+        share_config={"version": 2, "read_scope": None, "manage_scope": None},
+        created_by=None,
+        created_at=None,
+    )
 
 
 def _load_context_module():
@@ -32,6 +49,8 @@ def test_get_configurable_items_filters_admin_fields_for_user():
     items = BaseContext.get_configurable_items(user_role="user")
 
     assert "system_prompt" in items
+    assert items["preload_skills"]["default"] == []
+    assert items["preload_skills"]["kind"] == "skills"
     assert "summary_threshold" not in items
     assert "summary_keep_messages" not in items
     assert "summary_prompt" not in items
@@ -113,15 +132,64 @@ async def test_resolve_agent_resource_options_empty_fields_loads_nothing(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_lite_resource_options_exclude_persisted_knowledge_skill(monkeypatch):
+    """LITE 切换后旧库残留的内置知识 Skill 也不能进入 Agent 默认能力。"""
+
+    async def fake_list_skills(_db, _user):
+        return [
+            types.SimpleNamespace(slug="knowledge-base", name="Knowledge Base", description=""),
+            types.SimpleNamespace(slug="skill-a", name="Skill A", description=""),
+        ]
+
+    monkeypatch.setenv("LITE_MODE", "true")
+    monkeypatch.setitem(
+        sys.modules,
+        "yuxi.agents.skills.service",
+        types.SimpleNamespace(list_accessible_skills=fake_list_skills),
+    )
+
+    options = await context_module.resolve_agent_resource_options(
+        {"knowledges", "skills"},
+        db=object(),
+        user=object(),
+    )
+
+    assert options == {
+        "knowledges": [],
+        "skills": [{"key": "skill-a", "name": "Skill A", "description": ""}],
+    }
+
+    normalized = await normalize_agent_context_config(
+        {
+            "tools": [],
+            "knowledges": [],
+            "mcps": [],
+            "skills": None,
+            "preload_skills": ["knowledge-base"],
+        },
+        db=object(),
+        user=types.SimpleNamespace(role="user", uid="u1", department_id=None),
+        context_schema=BaseContext,
+    )
+
+    assert normalized["skills"] == ["skill-a"]
+    assert normalized["preload_skills"] == []
+
+
+@pytest.mark.asyncio
 async def test_normalize_agent_context_config_expands_null_and_filters_explicit_lists(monkeypatch):
     async def fake_get_databases_by_user(_user):
-        return {"databases": [{"kb_id": "kb-a"}, {"kb_id": "kb-b"}]}
+        return [_knowledge_summary("kb-a"), _knowledge_summary("kb-b")]
 
     async def fake_get_all_mcp_servers(_db):
         return [
             types.SimpleNamespace(slug="mcp-a", name="MCP A", description="", enabled=True),
             types.SimpleNamespace(slug="mcp-b", name="MCP B", description="", enabled=True),
         ]
+
+    async def fake_get_enabled_mcp_server_slugs(*, db=None):
+        del db
+        return ["mcp-a"]
 
     async def fake_list_skills(_db, _user):
         return [
@@ -146,7 +214,7 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
         types.SimpleNamespace(
             get_tool_metadata=lambda category=None: [
                 {"slug": "ask_user_question", "name": "Ask User", "description": ""},
-                {"slug": "tavily_search", "name": "Tavily", "description": ""},
+                {"slug": "web_search", "name": "Web Search", "description": ""},
             ]
         ),
     )
@@ -158,7 +226,10 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
     monkeypatch.setitem(
         sys.modules,
         "yuxi.agents.mcp.service",
-        types.SimpleNamespace(get_all_mcp_servers=fake_get_all_mcp_servers),
+        types.SimpleNamespace(
+            get_all_mcp_servers=fake_get_all_mcp_servers,
+            get_enabled_mcp_server_slugs=fake_get_enabled_mcp_server_slugs,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -177,6 +248,7 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
             "knowledges": ["kb-b", "missing", "kb-b"],
             "mcps": None,
             "skills": [],
+            "preload_skills": ["skill-a"],
             "subagents": ["research-agent", "missing"],
             "summary_threshold": 10,
             "summary_keep_messages": 8,
@@ -189,10 +261,11 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
         context_schema=ChatBotContext,
     )
 
-    assert normalized["tools"] == ["ask_user_question", "tavily_search"]
+    assert normalized["tools"] == ["ask_user_question", "web_search"]
     assert normalized["knowledges"] == ["kb-b"]
-    assert normalized["mcps"] == ["mcp-a", "mcp-b"]
+    assert normalized["mcps"] == ["mcp-a"]
     assert normalized["skills"] == []
+    assert normalized["preload_skills"] == []
     assert normalized["subagents"] == ["research-agent"]
     assert "summary_threshold" not in normalized
     assert "summary_keep_messages" not in normalized
@@ -209,14 +282,35 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
 
     assert empty_subagents_normalized["subagents"] == ["research-agent", "critique-agent"]
 
+    preloaded_normalized = await normalize_agent_context_config(
+        {
+            "tools": [],
+            "knowledges": [],
+            "mcps": [],
+            "skills": ["skill-a"],
+            "preload_skills": ["skill-b", "skill-a", "skill-a", "missing"],
+            "subagents": ["research-agent"],
+        },
+        db=object(),
+        user=types.SimpleNamespace(role="user", uid="u1", department_id=None),
+        context_schema=ChatBotContext,
+    )
+
+    assert preloaded_normalized["skills"] == ["skill-a"]
+    assert preloaded_normalized["preload_skills"] == ["skill-a"]
+
 
 @pytest.mark.asyncio
 async def test_prepare_agent_runtime_context_filters_resources_and_derives_runtime_scope(monkeypatch):
     async def fake_get_databases_by_user(_user):
-        return {"databases": [{"kb_id": "kb-a"}, {"kb_id": "kb-b"}]}
+        return [_knowledge_summary("kb-a"), _knowledge_summary("kb-b")]
 
     async def fake_get_all_mcp_servers(_db):
         return [types.SimpleNamespace(slug="mcp-a", name="MCP A", description="", enabled=True)]
+
+    async def fake_get_enabled_mcp_server_slugs(*, db=None):
+        del db
+        return ["mcp-a"]
 
     async def fake_list_skills(_db, _user):
         return [
@@ -229,16 +323,32 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
         context._visible_knowledge_bases = [{"slug": "kb-a", "name": "Docs A"}]
         return context._visible_knowledge_bases
 
-    async def fake_resolve_runtime_skills_for_context(context, *, db=None, user=None):
+    async def fake_resolve_runtime_skills_for_context(
+        context,
+        *,
+        db=None,
+        user=None,
+    ):
         del db
         assert user.uid == "u1"
         assert context.skills == ["skill-a"]
+        assert context.preload_skills == ["skill-a"]
         return {
             "context_skills": ["skill-a"],
-            "prompt_skills": ["skill-a", "skill-b"],
-            "readable_skills": ["skill-a", "skill-b"],
-            "runtime_skill_metadata": {"skill-a": {"name": "Skill A"}},
-            "runtime_skill_dependency_map": {"skill-a": {"skills": ["skill-b"]}},
+            "context_preload_skills": ["skill-a"],
+            "effective_skills": ["skill-a", "skill-b"],
+            "runtime_skills": {
+                "skill-a": {
+                    "name": "Skill A",
+                    "description": "",
+                    "path": "/home/gem/skills/skill-a/SKILL.md",
+                    "tools": [],
+                    "mcps": [],
+                    "skills": ["skill-b"],
+                }
+            },
+            "preloaded_skills": ["skill-a", "skill-b"],
+            "preloaded_skill_contents": {"skill-a": "# Skill A", "skill-b": "# Skill B"},
         }
 
     class FakeSessionContext:
@@ -247,6 +357,13 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
 
         async def __aexit__(self, exc_type, exc, tb):
             return None
+
+    class FakeSystemOptions:
+        async def get(self, _db=None):
+            return {"default_model": "fake-model"}
+
+    context_module = _load_context_module()
+    monkeypatch.setattr(context_module, "system_options", FakeSystemOptions())
 
     class FakeUserRepository:
         async def get_by_uid_with_db(self, _db, uid):
@@ -268,8 +385,11 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
     )
     monkeypatch.setitem(
         sys.modules,
-        "yuxi.agents.middlewares.skills",
-        types.SimpleNamespace(resolve_runtime_skills_for_context=fake_resolve_runtime_skills_for_context),
+        "yuxi.agents.skills.runtime",
+        types.SimpleNamespace(
+            is_skill_allowed_in_runtime_mode=lambda _slug: True,
+            resolve_runtime_skills_for_context=fake_resolve_runtime_skills_for_context,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -298,7 +418,10 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
     monkeypatch.setitem(
         sys.modules,
         "yuxi.agents.mcp.service",
-        types.SimpleNamespace(get_all_mcp_servers=fake_get_all_mcp_servers),
+        types.SimpleNamespace(
+            get_all_mcp_servers=fake_get_all_mcp_servers,
+            get_enabled_mcp_server_slugs=fake_get_enabled_mcp_server_slugs,
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -316,6 +439,7 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
         knowledges=["kb-a", "missing"],
         mcps=None,
         skills=["skill-a", "missing"],
+        preload_skills=["skill-a", "missing"],
         subagents=[],
     )
 
@@ -325,12 +449,13 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
     assert prepared.knowledges == ["kb-a"]
     assert prepared.mcps == ["mcp-a"]
     assert prepared.skills == ["skill-a"]
+    assert prepared.preload_skills == ["skill-a"]
     assert prepared.subagents == ["research-agent"]
     assert prepared._visible_knowledge_bases == [{"slug": "kb-a", "name": "Docs A"}]
-    assert prepared._prompt_skills == ["skill-a", "skill-b"]
-    assert prepared._readable_skills == ["skill-a", "skill-b"]
-    assert prepared._runtime_skill_metadata == {"skill-a": {"name": "Skill A"}}
-    assert prepared._runtime_skill_dependency_map == {"skill-a": {"skills": ["skill-b"]}}
+    assert prepared._effective_skill_slugs == ["skill-a", "skill-b"]
+    assert prepared._runtime_skills["skill-a"]["name"] == "Skill A"
+    assert prepared._runtime_skills["skill-a"]["skills"] == ["skill-b"]
+    assert prepared._preloaded_skills == ["skill-a", "skill-b"]
 
 
 @pytest.mark.asyncio
@@ -341,6 +466,13 @@ async def test_prepare_agent_runtime_context_clears_resources_for_missing_user(m
 
         async def __aexit__(self, exc_type, exc, tb):
             return None
+
+    class FakeSystemOptions:
+        async def get(self, _db=None):
+            return {"default_model": "fake-model"}
+
+    context_module = _load_context_module()
+    monkeypatch.setattr(context_module, "system_options", FakeSystemOptions())
 
     class FakeUserRepository:
         async def get_by_uid_with_db(self, _db, _uid):
@@ -353,7 +485,7 @@ async def test_prepare_agent_runtime_context_clears_resources_for_missing_user(m
     )
     monkeypatch.setitem(
         sys.modules,
-        "yuxi.agents.middlewares.skills",
+        "yuxi.agents.skills.runtime",
         types.SimpleNamespace(resolve_runtime_skills_for_context=lambda _context, db=None, user=None: None),
     )
     monkeypatch.setitem(
@@ -373,6 +505,7 @@ async def test_prepare_agent_runtime_context_clears_resources_for_missing_user(m
         knowledges=["kb"],
         mcps=["mcp"],
         skills=["skill"],
+        preload_skills=["skill"],
         subagents=["agent"],
     )
 
@@ -382,9 +515,8 @@ async def test_prepare_agent_runtime_context_clears_resources_for_missing_user(m
     assert prepared.knowledges == []
     assert prepared.mcps == []
     assert prepared.skills == []
+    assert prepared.preload_skills == []
     assert prepared.subagents == []
     assert prepared._visible_knowledge_bases == []
-    assert prepared._prompt_skills == []
-    assert prepared._readable_skills == []
-    assert prepared._runtime_skill_metadata == {}
-    assert prepared._runtime_skill_dependency_map == {}
+    assert prepared._effective_skill_slugs == []
+    assert prepared._runtime_skills == {}

@@ -5,8 +5,10 @@
 
 import asyncio
 
+import pytest
+
 from yuxi.services import task_service
-from yuxi.services.task_service import Tasker
+from yuxi.services.task_service import Task, Tasker
 
 
 class FakeRecord:
@@ -77,6 +79,35 @@ async def test_task_context_exposes_payload():
     await tasker.shutdown()
 
 
+async def test_find_task_by_payload_returns_latest_matching_task():
+    tasker = Tasker()
+    tasker._tasks = {
+        "old": Task(
+            id="old",
+            name="old",
+            type="knowledge_graph_index",
+            status="failed",
+            created_at="2026-07-18T10:00:00Z",
+            payload={"kb_id": "kb_test"},
+        ),
+        "new": Task(
+            id="new",
+            name="new",
+            type="knowledge_graph_index",
+            status="success",
+            created_at="2026-07-18T11:00:00Z",
+            payload={"kb_id": "kb_test"},
+        ),
+    }
+
+    task = await tasker.find_task_by_payload(
+        task_type="knowledge_graph_index",
+        payload_match={"kb_id": "kb_test"},
+    )
+
+    assert task is tasker._tasks["new"]
+
+
 async def test_progress_updates_are_throttled():
     repo = FakeRepo()
     tasker = await _make_tasker(repo)
@@ -139,46 +170,46 @@ async def test_shutdown_cancels_running_task_without_starting_queued_task():
     assert tasker._started is False
 
 
-async def test_shutdown_exits_when_cancel_status_persistence_fails():
-    class FailingCancelledRepo(FakeRepo):
-        async def upsert(self, task_id: str, data: dict) -> None:
-            await super().upsert(task_id, data)
-            if data.get("status") == "cancelled":
-                raise RuntimeError("cancel status persistence failed")
-
-    tasker = await _make_tasker(FailingCancelledRepo())
-    running = asyncio.Event()
-
-    async def blocking_coro(ctx):
-        running.set()
-        await asyncio.Event().wait()
-
-    task = await tasker.enqueue(name="active", task_type="demo", coroutine=blocking_coro)
-    await running.wait()
-    await _wait_status(tasker, task.id, {"running"})
-
-    await asyncio.wait_for(tasker.shutdown(), timeout=1.0)
-
-    assert (await tasker.get_task(task.id))["status"] == "cancelled"
-    assert tasker._workers == []
-    assert tasker._started is False
+class _FailingCancelledRepo(FakeRepo):
+    async def upsert(self, task_id: str, data: dict) -> None:
+        await super().upsert(task_id, data)
+        if data.get("status") == "cancelled":
+            raise RuntimeError("cancel status persistence failed")
 
 
-async def test_shutdown_exits_when_terminal_pruning_fails(monkeypatch):
+async def _make_tasker_with_failing_cancel_persistence(monkeypatch):
+    del monkeypatch
+    return await _make_tasker(_FailingCancelledRepo())
+
+
+async def _make_tasker_with_failing_terminal_pruning(monkeypatch):
     tasker = await _make_tasker(FakeRepo())
-    running = asyncio.Event()
-
-    async def blocking_coro(ctx):
-        running.set()
-        await asyncio.Event().wait()
 
     async def failing_prune():
         raise RuntimeError("terminal pruning failed")
 
+    monkeypatch.setattr(tasker, "_prune_terminal_tasks", failing_prune)
+    return tasker
+
+
+@pytest.mark.parametrize(
+    "make_tasker",
+    [
+        _make_tasker_with_failing_cancel_persistence,
+        _make_tasker_with_failing_terminal_pruning,
+    ],
+)
+async def test_shutdown_exits_when_status_persistence_or_pruning_fails(make_tasker, monkeypatch):
+    tasker = await make_tasker(monkeypatch)
+    running = asyncio.Event()
+
+    async def blocking_coro(ctx):
+        running.set()
+        await asyncio.Event().wait()
+
     task = await tasker.enqueue(name="active", task_type="demo", coroutine=blocking_coro)
     await running.wait()
     await _wait_status(tasker, task.id, {"running"})
-    monkeypatch.setattr(tasker, "_prune_terminal_tasks", failing_prune)
 
     await asyncio.wait_for(tasker.shutdown(), timeout=1.0)
 

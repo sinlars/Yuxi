@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from PIL import Image, ImageDraw, ImageFont
+from test.live_api_cleanup import make_test_conversation_metadata, make_test_conversation_title
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.e2e, pytest.mark.slow]
 
@@ -46,7 +47,11 @@ async def _create_agent(
                     "model_retry_times": 0,
                 }
             },
-            "share_config": {"access_level": "user", "department_ids": [], "user_uids": [uid]},
+            "share_config": {
+                "version": 2,
+                "read_scope": {"access_level": "user", "department_ids": [], "user_uids": [uid]},
+                "manage_scope": None,
+            },
         },
         headers=headers,
     )
@@ -57,7 +62,11 @@ async def _create_agent(
 async def _create_thread(client: httpx.AsyncClient, headers: dict[str, str], agent_slug: str) -> str:
     response = await client.post(
         "/api/chat/thread",
-        json={"agent_id": agent_slug, "title": f"read-file-e2e-{uuid.uuid4().hex[:8]}", "metadata": {}},
+        json={
+            "agent_id": agent_slug,
+            "title": make_test_conversation_title("read-file-e2e"),
+            "metadata": make_test_conversation_metadata("read-file-e2e", e2e=True),
+        },
         headers=headers,
     )
     assert response.status_code == 200, response.text
@@ -86,9 +95,7 @@ async def _upload(
         json={
             "attachments": [
                 {
-                    "file_name": uploaded["file_name"],
                     "file_type": uploaded.get("file_type"),
-                    "bucket_name": uploaded["bucket_name"],
                     "object_name": uploaded["object_name"],
                 }
             ]

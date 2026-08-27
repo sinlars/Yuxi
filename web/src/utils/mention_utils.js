@@ -1,12 +1,7 @@
 import { getDisplayFileName } from '@/utils/file_utils'
+import { mentionTypePrefixMap } from './mention_token.js'
 
-export const mentionTypePrefixMap = {
-  file: 'file',
-  knowledge: 'knowledge',
-  mcp: 'mcp',
-  skill: 'skill',
-  subagent: 'subagent'
-}
+export { formatMentionToken, mentionTypePrefixMap } from './mention_token.js'
 
 const mentionTypePattern = Object.values(mentionTypePrefixMap).join('|')
 const mentionTokenRegex = new RegExp(
@@ -14,20 +9,7 @@ const mentionTokenRegex = new RegExp(
   'g'
 )
 
-const quoteMentionValue = (value) =>
-  String(value ?? '')
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
 const unquoteMentionValue = (value) => String(value ?? '').replace(/\\(["\\])/g, '$1')
-
-export const formatMentionToken = (type, value) => {
-  const prefix = mentionTypePrefixMap[type] || type
-  const rawValue = String(value ?? '')
-  if (/\s|["\\]/.test(rawValue)) {
-    return `@${prefix}:"${quoteMentionValue(rawValue)}"`
-  }
-  return `@${prefix}:${rawValue}`
-}
 
 export const parseMentionText = (text = '') => {
   const value = String(text || '')
@@ -160,13 +142,21 @@ export const expandMentionDeletionRange = (
   text = '',
   start = 0,
   end = start,
-  direction = 'backward'
+  direction = 'backward',
+  knownMentionRanges = []
 ) => {
   const value = String(text || '')
   const safeStart = Math.max(0, Math.min(start, value.length))
   const safeEnd = Math.max(safeStart, Math.min(end, value.length))
-  const mentions = parseMentionText(value).filter((segment) => segment.kind === 'mention')
+  const cursor = safeStart
+  if (safeStart === safeEnd && direction === 'backward') {
+    const knownMention = knownMentionRanges.find(
+      (mention) => mention && cursor === mention.end && mention.start < mention.end
+    )
+    if (knownMention) return { start: knownMention.start, end: knownMention.end }
+  }
 
+  const mentions = parseMentionText(value).filter((segment) => segment.kind === 'mention')
   if (safeStart !== safeEnd) {
     const touchedMentions = mentions.filter(
       (segment) => segment.start < safeEnd && segment.end > safeStart
@@ -179,7 +169,6 @@ export const expandMentionDeletionRange = (
     }
   }
 
-  const cursor = safeStart
   if (direction === 'forward') {
     const mention = mentions.find((segment) => cursor >= segment.start && cursor < segment.end)
     if (!mention) return null

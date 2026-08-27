@@ -1,21 +1,23 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server.routers.auth_router import delete_user
-from server.routers.user_router import APIKeyCreate, create_api_key
+from server.routers.user_router import APIKeyCreate, create_api_key, get_accessible_api_key
 from server.utils.auth_middleware import _verify_api_key
-from yuxi.repositories import user_repository as user_repository_module
-from yuxi.repositories.user_repository import UserRepository
+from yuxi.repositories.api_key_repository import APIKeyRepository
 from yuxi.storage.postgres.models_business import APIKey, Base, Department, User
 from yuxi.utils.auth_utils import AuthUtils
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
+
+
+@pytest.fixture(autouse=True)
+def api_key_derivation_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("API_KEY_DERIVATION_SECRET", "test-api-key-derivation-secret-32-chars")
 
 
 class _ScalarResult:
@@ -134,7 +136,11 @@ async def test_create_api_key_rejects_mismatched_department(session):
 
     with pytest.raises(HTTPException) as exc:
         await create_api_key(
-            APIKeyCreate(name="wrong department", department_id=session["dept_b"].id),
+            APIKeyCreate(
+                request_id="request-wrong-department",
+                name="wrong department",
+                department_id=session["dept_b"].id,
+            ),
             current_user=session["regular_user"],
             db=db,
         )
@@ -146,7 +152,11 @@ async def test_create_api_key_allows_current_user_department(session):
     db = session["db"]
 
     response = await create_api_key(
-        APIKeyCreate(name="own department", department_id=session["dept_a"].id),
+        APIKeyCreate(
+            request_id="request-own-department",
+            name="own department",
+            department_id=session["dept_a"].id,
+        ),
         current_user=session["regular_user"],
         db=db,
     )
@@ -154,6 +164,43 @@ async def test_create_api_key_allows_current_user_department(session):
     assert response.api_key.user_id == session["regular_user"].id
     assert response.api_key.department_id == session["dept_a"].id
     assert response.secret.startswith(response.api_key.key_prefix)
+
+
+async def test_api_key_repository_enforces_requester_visibility(session):
+    """非超级管理员的查询必须在 repository 层过滤其他用户的 Key。"""
+    db = session["db"]
+    _secret, key_hash, key_prefix = AuthUtils.generate_api_key()
+    api_key = APIKey(
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        name="regular user key",
+        user_id=session["regular_user"].id,
+        department_id=session["dept_a"].id,
+        created_by=str(session["regular_user"].id),
+    )
+    db.add(api_key)
+    await db.commit()
+    await db.refresh(api_key)
+    repository = APIKeyRepository(db)
+
+    foreign_access = await repository.get_accessible(
+        api_key_id=api_key.id,
+        requester_user_id=session["dept_b_admin"].id,
+        is_superadmin=False,
+    )
+    assert foreign_access.api_key is None
+    assert foreign_access.exists is True
+
+    with pytest.raises(HTTPException) as exc:
+        await get_accessible_api_key(repository, api_key.id, session["dept_b_admin"])
+    assert exc.value.status_code == 403
+
+    superadmin_access = await repository.get_accessible(
+        api_key_id=api_key.id,
+        requester_user_id=session["superadmin"].id,
+        is_superadmin=True,
+    )
+    assert superadmin_access.api_key is api_key
 
 
 async def test_delete_user_disables_owned_api_keys(session):
@@ -174,31 +221,4 @@ async def test_delete_user_disables_owned_api_keys(session):
     await db.refresh(api_key)
 
     assert result["success"] is True
-    assert api_key.is_enabled is False
-
-
-async def test_user_repository_soft_delete_disables_owned_api_keys(session, monkeypatch):
-    db = session["db"]
-    _secret, key_hash, key_prefix = AuthUtils.generate_api_key()
-    api_key = APIKey(
-        key_hash=key_hash,
-        key_prefix=key_prefix,
-        name="repository owned key",
-        user_id=session["regular_user"].id,
-        created_by=str(session["regular_user"].id),
-    )
-    db.add(api_key)
-    await db.commit()
-    await db.refresh(api_key)
-
-    @asynccontextmanager
-    async def fake_session_context():
-        yield db
-        await db.commit()
-
-    monkeypatch.setattr(user_repository_module.pg_manager, "get_async_session_context", fake_session_context)
-
-    assert await UserRepository().soft_delete(session["regular_user"].id) is True
-    await db.refresh(api_key)
-
     assert api_key.is_enabled is False

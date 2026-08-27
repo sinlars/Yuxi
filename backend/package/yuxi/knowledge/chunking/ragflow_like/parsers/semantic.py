@@ -137,10 +137,11 @@ def chunk_markdown(
     # 延迟加载重型资源，仅在没有注入 embed_fn 时触发
     if embed_fn is None:
         try:
-            from yuxi.config.app import config
             from yuxi.models.embed import select_embedding_model
 
-            embed_model_id = parser_config.get("embed_model_id") or config.embed_model
+            embed_model_id = parser_config.get("embed_model_id")
+            if not embed_model_id:
+                raise ValueError("语义切分缺少 embed_model_id")
             logger.info(f"语义切分加载Embedding模型: {embed_model_id}")
             embed_model = select_embedding_model(embed_model_id)
             embed_fn = embed_model.encode
@@ -162,14 +163,17 @@ def chunk_markdown(
     while i < len(tokens):
         token = tokens[i]
         if token.type == "heading_open":
+            inline_token = tokens[i + 1] if i + 1 < len(tokens) else None
+            full_title = inline_token.content.strip() if inline_token and inline_token.type == "inline" else ""
+            if not full_title:
+                i += 3
+                continue
+
             _flush_content(result, current_content, title_stack, max_length, embed_fn)
             level = int(token.tag[1:]) if token.tag and len(token.tag) > 1 else 1
-            inline_token = tokens[i + 1]
-            if inline_token.type == "inline":
-                full_title = inline_token.content.strip()
-                title_stack[level - 1] = full_title
-                for j in range(level, 6):
-                    title_stack[j] = ""
+            title_stack[level - 1] = full_title
+            for j in range(level, 6):
+                title_stack[j] = ""
             i += 3
             continue
         elif token.type == "table_open":

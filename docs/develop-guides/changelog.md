@@ -1,8 +1,119 @@
 # 版本变更记录
 
-本页用于记录各版本发布说明（新增、修复与破坏性变更）。
+本页记录各版本的新增功能、修复、兼容性变化和升级注意事项。
 
-同一版本的多次功能更新时，应以功能为单位进行更新，比如之前添加了 A 功能的更新，在后续的更新中修复了因 A 功能引入的 bug，那么这个修复说明应该和 A 功能描述放在一起，而不是新增一条修复记录，功能更新同理。
+同一版本的多次更新按功能归并。后续修复某项功能引入的问题时，直接更新原条目，避免同一问题在多个位置重复出现。当前版本的条目优先说明用户影响、操作变化和验证边界；实现细节只保留对升级、排障或贡献有帮助的部分。
+
+## v0.7.2.beta2 (2026-08-26)
+
+::: warning Beta 升级说明
+beta2 延续 beta1 的存储与数据库迁移边界。从 v0.7.1 或更早版本升级时，仍须先完整备份 PostgreSQL、MinIO 和文件卷，并按[生产部署与升级](../advanced/deployment.md)执行停机迁移；不要只恢复其中一项。
+:::
+
+- Project Workdir 内的 `write_file` 与 `edit_file` 在默认审批模式下可自动放行；Project 外写入和 `execute` 继续要求审批，Sandbox 文件权限边界不变。
+- 修复文件夹上传未保留相对目录结构和文件统计的问题，并完善知识库真实文件夹管理、历史虚拟目录迁移与大规模列表性能。
+- Agent 交付物支持选择保存目录，Office/PDF 预览链路和对话绑定模型优先级得到修复；调试面板按真实 Run 分组并可精确跳转 Langfuse trace。
+- Dashboard、用户管理分页、知识库 OCR 配置和数据库 schema 迁移入口完成收敛，减少大数据量和升级场景中的不一致。
+- pnpm 升级到 11.24.0、uv 升级到 0.12.6，并刷新 Web、docs、backend 与 CLI 锁文件；生产依赖审计无已知漏洞。
+- Vue 图标依赖从已废弃的 `lucide-vue-next` 迁移到官方 `@lucide/vue` 1.34.0，现有图标名称、尺寸和样式保持兼容。
+
+## v0.7.2.beta1 (2026-08-23)
+
+::: danger Beta 版本与数据风险
+v0.7.2.beta1 包含不可逆的数据与文件布局迁移，主要影响历史对话线程、附件、Agent 产物和运行状态。本版本用于验证升级路径，不建议在重要、生产或缺少可恢复备份的环境中运行。
+:::
+
+::: warning 升级前检查与迁移
+1. 自动迁移只支持从 v0.7.1 正式版或当前 v0.7.2 schema 升级；运行过未发布 Workdir 中间 schema 的实例会被明确拒绝，不能直接原地升级。
+2. 安排维护窗口并停止业务写入，在同一停机时点完整备份 PostgreSQL、MinIO 和 `docker/volumes/yuxi`，并确认备份可以成套恢复。迁移会修改 Conversation/Project 关系、附件路径、旧 thread 文件布局及持久目录所有权。
+3. 检出 `v0.7.2.beta1` 后，先使用与重启时完全相同的 Compose、env file 和 profile 参数运行 `bash scripts/migrate-storage.sh ...`；迁移成功前不要启动新 API 或 worker。完整命令见[生产部署指南](../advanced/deployment.md)。
+4. 迁移按 Workdir、系统配置、共享 Skill 和运行身份分阶段提交。任一阶段失败后保持 API/worker 停止，保留完整日志，修复冲突后重跑同一命令；需要回滚时，检出 v0.7.1 并从同一停机时点成套恢复 PostgreSQL、MinIO 和文件卷，禁止只恢复其中一项。
+5. 每个历史顶层 Conversation 会获得 implicit Project，子 Conversation 继承所属 Project；旧 `threads/<thread-id>/user-data/uploads|outputs` 会导入 UserWorkspace 的 `projects/<uuid>`，相关附件和 artifact 路径会被重写。每一类旧源只在自身目标提交并回读成功后清理。
+6. 迁移会把非终态 AgentRun 收敛为可观察失败。v0.7.1 SQLite LangGraph checkpoint 不迁移，升级前尚未完成的审批、中断、摘要或执行状态无法继续恢复；请先完成或终止重要运行，并保存所需结果。
+7. 持久 UserWorkspace、Skill source/projection 的所有权会统一为 `1000:1000`，目录和普通文件权限会分别收紧到 owner-only。依赖其他宿主机用户直接读取这些目录的自定义脚本需要提前调整。
+8. v0.7.1 的 `config/base.toml` 与共享 Skill 由同一次迁移切换到 PostgreSQL 和新 Skill source；个人 Skill 保留在各用户 UserWorkspace，不会进入共享投影。
+9. 历史知识库 Markdown 与 `public` bucket 图片不会自动迁移到私有 bucket；升级后这些旧 URL 仍可能匿名可读。重要知识库应重新解析生成私有图片，并在核对新结果后清理旧公开对象。
+10. 管理员此前创建的 stdio MCP 会被禁用且无法重新启用。请迁移为 SSE 或 Streamable HTTP，或直接删除；代码内置的系统 stdio MCP 不受影响。
+11. 重建或升级 Redis 后需重启 worker，并等待 `/api/system/ready` 恢复后再接入流量。
+:::
+
+- 锁定 Neo4j 5.26.29 与 Redis 7.4.10 镜像版本，补充第三方组件许可证、镜像再分发义务与商业部署边界；完整镜像许可证以实际软件物料清单为准。
+- API 与 worker 的日志及 Office 预览缓存改用各自容器本地运行目录，不再写入共享 `saves`；管理端日志接口与调试面板明确只展示 API 进程日志。历史日志和预览缓存不迁移，worker 日志由容器日志查看。
+- LangGraph checkpoint 固定使用 PostgreSQL，删除 SQLite saver、后端选择环境变量、本地 checkpoint 挂载和旧 SQLite checkpoint 自动迁移。
+- 新增 Project 资源并作为 Workdir 归属 Owner：Conversation 只保存不可变 `project_id`；默认对话创建 implicit Project，用户可创建绑定既有 Workspace 目录的 selectable Project。多个 Project 可共享目录，但顶层 Conversation 的 runtime 仍相互隔离。
+- 根 Conversation 与全部子 Agent 共用稳定 `runtime_scope_id` 和 Workdir；不同顶层 Conversation 即使绑定同一目录也使用独立 runtime。Viewer、附件与 artifact 通过持久化 `Workspace` 与 `Workdir` 访问同一 POSIX 字节，不再创建 file-bridge Sandbox。
+- Workspace 路径与 no-follow 文件访问迁至顶层 `yuxi.workspace`；Viewer API 统一使用当前 Workdir 相对路径并复用 Workspace 的预览与有界扫描。删除开发期 Thread 文件浏览接口及 Mention Redis 文件索引，不为 0.7.2 开发快照保留兼容层。
+- `uploads/outputs` 改为首次使用时创建，Sandbox provisioner 不再预建目录或递归修改整个 UserWorkspace 权限。附件上传只保留 MinIO 临时上传、可选解析、确认一条链路；Agent 每轮通过当前用户消息获得线程历史附件路径，不再修改系统提示词或维护 `uploads` state。Conversation 附件 JSON 不再复制 Markdown、hash 和派生 URL；确认批次逐项处理且不限制数量，未确认临时对象在后续上传时清理超过 24 小时的分组。
+- `storage-migrator` 在停机证明后分阶段迁移 v0.7.1 的 `base.toml`、共享 Skill 与 thread `uploads/outputs`，为历史 Conversation 建立 Project Workdir；每类旧源在自身目标提交并回读成功后清理，失败后可在保持停机的前提下幂等续跑。未发布的 Workdir 中间 schema 不进入兼容范围。
+- 建立 Agent-first 工程信任系统：高风险主张在语义 Owner 处绑定负向 oracle、CI gate 与决策记录；API 分离 liveness/readiness，LITE 只宣告真实能力，Run 输出、取消、lease 和失联收敛由 PostgreSQL 事实闭合。
+- AgentRun 新增 write-once 运行清单指纹和持久化 RunAttempt 历史，记录实际模型、工具、Skill、关键配置与每次执行占有结果；敏感值、用户正文和宿主机路径不进入清单。
+- 升级 DeepAgents 到 0.7.7+ 与新版 LangChain 底座：每个 Run 使用独立 CompositeBackend，文件读取与 grep 提供结构化分页/截断语义，Summary 适配新版会话和内联媒体 offload；未纳入审批设计的 delete 工具保持关闭。
+- Agent 配置新增 Skill 预加载：指定 Skill 的根级说明和依赖工具从首轮模型请求起可用，默认空配置继续渐进加载；预加载严格受当前用户授权、Agent Skill 列表和 LITE 能力边界约束。
+- 新增用户级 Memory：开启后仅主 Agent 可读取和受限更新 UserWorkspace 的 `agents/MEMORY.md`，并可按需搜索当前用户的普通历史对话；SubAgent、关闭开关和非法 Run owner 均不能使用该能力。
+- Sandbox 异步 `read_file` 改用 agent-sandbox 原生文件 API，保持同步读取的路径授权、类型错误和分页语义；图片流式执行大小限制并编码，HTTP client 由每次读取显式关闭。
+- AgentPanel 统一承载文件树、文件预览与子智能体线程 Tab，并按 Workdir、Workspace、artifact 三种身份选择读取接口；文件刷新只在可见运行期轮询，终态补读最终持久字节。
+- Web 补充流式文本平滑、知识库结果按真实文件身份分组、紧凑片段弹窗及首页/工作区展示优化；超级管理员可开启对话 Debug 模式，在 Agent 侧栏按后端消息顺序查看、筛选、复制和展开原始消息 JSON，并从 Run 分组精确跳转到对应 Langfuse trace；历史大块文本和 Run 终态仍立即收敛到完整内容。
+- API Key 创建支持并发与响应丢失后的安全重放；删除用户、OIDC 恢复和旧库升级均保留不可复活 tombstone，API/CLI 创建与删除按 User 行锁串行化。三项安全密钥不可复用，Bash/PowerShell 均有原生负控。Web 错误对象不再携带任意服务端上下文。
+
+- 清理测试套件冗余：删除 5 个自证式/假绿/重复覆盖的测试文件（`test_hash_utils`、`test_skills_backend_error_handling`、`test_graph_router_list`、`test_agent_sync_e2e`、`test_viewer_filesystem_e2e`），合并约 50 个文件的重复场景与参数转发断言，抽取 eval 与 e2e 共享 helper；净减约 2,900 行测试代码，真实回归覆盖不变。
+
+
+- 完善 Agent Token 用量统计：state 同时保留近似上下文与主 Agent 模型返回的 Provider `usage_metadata`，实际用量拆分为最近调用、当前 Run 和线程累计；前端只读取 state，终态 chunk 不传递用量，worker 在 Run 终态时将父线程中 Run ID 匹配的 state 快照写入 AgentRun。支持 OpenAI priority/flex 缓存明细；L2 摘要内部调用暂未计入完整账单口径。
+- 对话输入草稿按线程保存：输入内容实时写入 localStorage（按线程 ID 区分），切换对话时保存旧线程草稿并还原新线程草稿，新建对话使用独立草稿、发送创建线程后自动清理，刷新页面后草稿仍可还原，删除对话时同步清理对应草稿。
+- Agent 侧边栏文件面板与工作区新增文件搜索：按文件名递归匹配（Agent 面板限当前对话 viewer 命名空间，工作区限个人工作区），弹窗样式与对话搜索一致，支持关键词高亮与键盘操作，命中文件可直接打开预览；侧边栏 outputs/uploads 目录为空时不再展示，workspace 目录默认展开。
+- 统一全局搜索弹窗：对话搜索与工作区文件搜索合并为同一组件，侧边栏入口默认搜索对话并可在「对话 / 工作区文件」间切换，工作区与 Agent 面板入口默认搜索对应文件；侧边栏搜索到工作区文件后跳转工作区并自动打开预览。
+- 对话消息补充时间信息：历史接口为 assistant 消息附上关联 run 的 started_at/finished_at；复制按钮右侧以纯文本显示消息完成时间，点击切换为执行耗时（如"耗时 5s"）再点切回，无背景色块与时钟图标；时间按相对规则展示（今天 HH:mm、昨天、一周内周几、更早显示日期、跨年补全年份）。流式生成时 loading 旁实时显示已执行时长，loading 指示器去除背景色块并改为轻微呼吸的文字样式。
+- 修复 Agent 产物 Word 文件无法预览：查看器文件预览路径（outputs、uploads、沙盒文件）与工作区一致，docx/pptx 先经 LibreOffice 转换为 PDF 再预览，转换失败返回明确错误，不再判定为二进制文件拒绝预览。
+- Agent 文件预览的 HTML 预览新增缩放比例调节（默认 90%，范围 60%–150%，步进 10%）：内联、顶部工具栏与全屏预览均提供缩小/放大按钮并实时显示百分比，切换文件时重置为默认比例，预览/源码模式切换仅在预览态显示缩放控件。
+- 修复公开图片上传的存储型 XSS 风险：头像与用户图片不再信任客户端 MIME 或文件名后缀，服务端校验真实图片内容且仅接受 PNG、JPEG、WebP、GIF，对象名使用识别出的固定安全后缀，拒绝伪装成图片的 SVG。
+- 修复后续知识库解析图片的公开访问风险：新解析或重新解析产生的图片写入私有 `kb-images` bucket，并通过带知识库读权限校验的后端代理读取；历史 Markdown 和旧 `public` 对象不自动迁移，需重新解析并人工清理才能消除既有匿名 URL。
+- 登录新增 IP 级失败限速并修复锁定计数残留：`/auth/token` 按「IP+账号」与「IP 全局」在 Redis 滑动窗口内累计失败（10 分钟内 10/30 次，跨 worker 与重启有效），超限返回 429 与 Retry-After，与账号级锁定叠加；账号锁定到期后首次访问清零失败计数，解锁后首次失败不再立即重新锁定；登录成功清除对应 IP+账号失败记录。
+- 修复个人 Skill 列表权限解析错误：个人 Skill 不再进入共享配置解析，所有者获得管理权限，其他用户不可访问；同时修正数据库 UTC-naive 时间的序列化，子智能体运行时间不再错误偏移 8 小时。
+
+- 优化知识库文档列表性能：根目录虚拟目录分组改用部分索引（`idx_kf_kb_parent_segment` 按路径首段聚合），平铺文件筛选与排序用 `idx_kf_kb_parent_flat` 支撑，避免大知识库全表扫描与 46MB 磁盘排序溢出；文件统计聚合结果增加 10 秒 Redis 短缓存，列表、统计、子目录计数与创建人查询并行执行，前端自动刷新轮询间隔同步调整为 10 秒。36 万文件知识库列表接口耗时由约 1.3s 降至约 300ms。
+- 修复 MCP 管理接口可通过 stdio 启动任意本地进程的问题：用户配置仅允许 SSE/Streamable HTTP，运行时拒绝加载历史用户 stdio 记录，系统内置 stdio 的连接参数改为仅由代码维护；前端移除用户 stdio 配置入口，文档补充内置 stdio 的代码添加与验证方式。
+- 收窄知识库状态边界：读取模型统一收口至 `read_models.py`；创建、列表、详情与更新由 Manager 统一返回 `KnowledgeBaseSummary/Detail`，Router 只转换 HTTP 响应；Manager 协调查询配置、主记录与聚合统计，Repository 在行锁内合并统计投影；executor 接收 frozen `KnowledgeBaseConfig`，负责类型资源、文档操作与类型专属一致性检测，不再写知识库主记录。
+- 修复 Agent worker 知识库运行配置不一致：`get_kb_config` 从 Redis 读取最小 Config 快照，未命中时在 KB 级分布式锁内回源 PostgreSQL，Redis 连接故障时只读请求直接回源且不回填；更新与删除先可靠失效缓存再提交数据库，避免旧请求回填过期配置。查询参数在数据库行锁内合并，并发保存不再互相覆盖。
+- 精简知识库文档内容接口响应：`GET /api/knowledge/databases/{kb_id}/documents/{doc_id}/content` 不再返回分块内部的实体 ID 与抽取结果，避免向文档预览请求传输仅供知识图谱构建使用的数据。
+- 清理未使用的共享访问级别常量模块，移除 Agent、Skill 与知识库中的冗余导入和别名；共享范围校验继续由统一权限模块负责。
+- 统一 Agent、Skill 与知识库共享权限：配置拆分读取/管理范围并统一解析 `none/read/manage`；启动时将旧 `share_config` 幂等迁移为 v2 且只回填只读范围、不追溯授予管理权，运行时代码仅接受 v2；创建者与超管保留管理权。非管理员创建或编辑 Agent 时共享范围与 Skill 一致收敛为仅个人可见，避免越权扩大到部门或全局；共享 Skill 仅管理员可安装，普通用户固定安装到个人 Skill 持久源。知识库路由统一按 READ/MANAGE ACL 校验，配置弹窗按基础信息、权限、检索分栏，非检索保存不再覆盖检索参数，编辑表单不再残留已移除的“自动生成问题”开关；用户编辑不允许修改角色身份。同步修复 Agent/Skill `share_config` 列实际类型为 `json` 而非预期 `jsonb` 导致迁移语句报错、后端无法启动的问题。
+- 收敛消息型 AgentRun 提交：Web Chat 与 Agent Call/Eval 共用 `run_submission_service.submit_run_command`，Call/Eval 拆为独立 Router；Request/Run 固化 `source/channel/external_id/origin_metadata` 来源快照，Eval 评估上下文继续透传到 worker 与 Langfuse，保留现有接口与响应兼容性，Resume、Subagent 生命周期不变。
+- 新增个人 Skill：安装确认可选择个人或共享位置；个人 Skill 保存在 UserWorkspace 的 `agents/skills/<slug>` 且不入库，元数据按用户缓存 5 分钟并在安装、删除、手动刷新后立即更新；Card List 与 Agent 运行时统一按个人版本覆盖同名共享版本，卡片与聊天技能选择列表共用 slug 到 Lucide 图标映射；共享与内置版本复制到 uid 级 `/home/gem/skills` 只读投影，个人版本直接从 `/home/gem/user-data/agents/skills` 读取。
+- 统一后端真实路径根目录校验：Skill、工作区和沙盒复用 `ensure_within_root`，保持原有越界拒绝语义并减少重复安全判断。
+- 统一前端单元测试目录为 `web/test/unit`，测试脚本仅收集该目录；测试规范同步说明主应用与独立 CLI 包的目录约定，避免同一子项目混用 `test` 和 `tests`。
+- Skill 推荐区升级为套件卡片，首批提供 Anthropic 文档处理套件；统一选择、短时加载、生效范围和结果四步弹窗，远程仓库与全局搜索保持在同一弹窗，选择页标签居中并以桌面三列网格展示，技能列表支持纵向滚动；确认页支持移除、范围摘要及失败草稿清理；公共扩展卡片采用紧凑 gray 样式；上传入口共用普通请求流程，支持部分失败与重试。
+- 远程 Skill 来源策略迁移到 PostgreSQL，并在「基本设置」提供精确域名白名单配置；默认允许 GitHub 与 ModelScope，空列表会关闭远程安装。远程 Skill CLI 改用无环境凭据的一次性 Sandbox，删除失败时也清理一次性连接缓存；Kubernetes 不挂载 ServiceAccount token；数据回流严格校验相对路径并限制文件数、目录深度和总大小，同时统一命令与 HTTP 超时，修复 #895 并缩小 #855 的风险面。
+- 新增 PDF 解析前置页树校验：PDF 进入 PyPDFLoader、MinerU 或 OCR 引擎前会用 PyMuPDF 逐页加载页槽，提前识别加密、空文档、null 页槽和非 Page 对象等结构异常，并返回可操作的中文错误，避免解析服务内层延迟失败。
+- 修复真实 API 测试资源清理：integration 与 E2E 会在测试会话前后通过公开接口删除名称以 `pytest`（兼容旧 `py_test`）开头的评估基准、评估运行和知识库，并删除带显式 E2E 标记的对话、临时智能体及独立沙盒目录；知识库删除改用列表真实返回的 `kb_id`，清理失败会明确中止测试，避免测试数据污染最近对话或长期残留。
+- CLI 新增 `yuxi chat` 本地网页调试入口：临时服务仅监听 `127.0.0.1`，使用本地保存的 remote 与 API Key 代理 Agent Call 和 Run SSE，浏览器可连续对话并实时显示文本增量；API Key 不进入页面，支持指定智能体、remote 及仅打印地址。
+- 新增纯文本 Channel 入口：`/api/agent-invocation/channel/messages` 统一接收 CLI/未来 IM 消息，普通文本复用 `submit_run_command` 并默认使用 `steer`，首版支持 `/state` 查询线程状态与 `/approve` 恢复工具审批；`yuxi chat` 已切换到该入口，并将工具审批中断显示为等待 `/approve` 的正常状态，页面采用无侧边栏的微信 PC 对话布局与色块头像，暂不处理 `ask_user_question`。同步修复测试模块重名、Subagent Run 来源快照错误，并在 HTTP 与共享提交边界拒绝超长来源字段。
+- 优化知识图谱构建：以持续队列并发执行 LLM 抽取、结构写入和向量索引，失败自动重试并持久化进度；已有结果支持断点恢复，新增按最近 Chunk 查询失败样例和向量 reconcile 接口，任务与前端分别展示抽取、结构、向量进度，索引面板支持键盘操作。
+- HTML 辅助可视化迁移为内置 `html-preview` Skill：默认 Chatbot Prompt 不再常驻注入 `html:preview` 专属说明，Agent 改为通过统一的 Skill 描述发现并按需读取静态 HTML/CSS 的适用场景、布局和安全边界；未显式配置 Skills 的 Agent 按现有默认规则自动获得该能力，使用显式 Skills 允许列表的 Agent 需选择 `html-preview`，内置 `deep-research` 已声明依赖；保留前端既有围栏清洗、sandboxed iframe、自适应高度和流式占位行为，普通 HTML 源码继续使用 `html` 代码块。
+- 模型供应商的单个 chat 模型配置新增“模型请求参数 JSON”：管理员可为每个模型独立保存、回显、修改和清空思考参数，未配置或空对象保持原行为；运行时模型缓存会携带该配置，测试模型连接与正式聊天/Agent 调用统一在模型加载入口合并。该字段仅面向 OpenAI/OpenRouter 等 OpenAI 兼容供应商，并通过 `extra_body` 透传；出于安全考虑，顶层字段采用白名单机制，当前支持 `enable_thinking`、`thinking_budget`、`thinking`、`reasoning` 和 `reasoning_effort`，对象内部结构交由供应商校验。
+- 新增通用管理员配置 Options 模块：系统运行时配置迁移到 PostgreSQL，API 与 worker 通过带版本失效的 Redis 短缓存共享最新值，Redis 故障时回源数据库；旧 `base.toml` 只补充缺失字段且读取失败后可重试。LangGraph checkpoint 默认使用 PostgreSQL，跨进程串行初始化且异常解锁时销毁持锁连接；附件正式文件迁移到 MinIO，本地按需缓存，Run 在提交数据库快照后恢复附件，避免重复查询和长事务。
+- 修复部署配置：开发与生产 Compose 中的 Milvus 现在复用对应环境文件里的自定义 MinIO 凭据，避免对象存储认证失败导致服务无法健康启动；Web 生产镜像会统一将静态资源目录设为 `755`、文件设为 `644`，避免 Nginx 因构建产物权限过严返回 403。
+- 补充模型选型参考信息：接入 `@opencode-ai/models` 内置 snapshot，补充模型上下文、能力和价格等信息；模型选择器移除价格悬浮提示并关闭搜索自动完成，底部增加“配置模型”入口；模型供应商候选列表支持美元与人民币价格切换，默认美元，人民币按固定汇率 `1 USD = ¥7` 换算，并明确 models.dev 数据与固定汇率仅供参考；候选模型工具栏统一靠右排列搜索、币种和类型筛选控件，类型文案改为“对话 / 向量 / 重排”。DashScope 中国站内置标识修正为 `alibaba-cn`，`alibaba` 改为使用 `dashscope-intl.aliyuncs.com` 的国际站定义。
+- 优化 Agent 会话与设置页多项交互细节：修复文件侧栏重新展开丢失预览、审批模式改为本地记忆最近选择、下拉面板点击外部区域自动收起、输入框添加内容入口改为 `+` 并可直接引用知识库与 Skill、Skill 图标统一为 Lucide `WandSparkles`、账户设置合并 Memory 开关等；侧栏导航“智能体管理”简化为“智能体”，路由由 `/model-manage` 重命名为 `/agent-manage`；智能体卡片增加共享范围标签，并将“去对话”调整为紧凑文字入口；文件预览标签的关闭按钮补充紧凑圆角悬浮、按下和键盘聚焦状态；同步优化首页首屏视觉细节。
+- 新增 Agent backend 工具审批与完全信任模式：Agent 配置可定义默认模式，聊天 run、Agent Call 与评估请求可用 `tool_approval_mode` 做单次覆盖，实际模式固化到 `AgentRun` 并由 resume/子智能体继承；默认审批仅拦截 `write_file`、`edit_file`、`execute`，只读 filesystem 工具直接执行，完全信任保持自动执行。前端输入框左下角新增线程级“请求审批 / 完全信任”选择器，支持刷新恢复显式选择；智能体配置页将带选项的 `string` 字段正确渲染为选择控件，模式解析按“线程显式选择、智能体显式配置、本地最近选择、系统默认值”依次回退，避免本地缓存覆盖智能体配置。同轮多个工具调用按顺序一次展示一项，参数默认只显示单行摘要，点击后带轻量动画在卡片内展开完整内容，展开区最大高度为 300px。审批卡进一步调整为直接覆盖输入区，按工具类型优先展示命令或目标路径，操作固定为“拒绝 / 允许”，审批期间底层输入控件不可交互。默认模式下子智能体隐藏敏感 backend 工具，避免绕过主线程审批。补充模式解析、middleware、run 继承、事件压缩、子智能体过滤、前端状态恢复测试，并在真实页面验证刷新恢复、逐项批准或拒绝、参数点击展开与完全信任自动执行。模式解析合并为单次 context 共享（resolve_agent_run_config）避免 run 创建/intake 重复加载上下文；resume 与子智能体继承统一读取固化快照，前端审批弹窗参数序列化改为 computed，并清理 `reviewConfigs` 等未消费状态。resume 解析 tool_approval_mode 时对旧版本固化、缺少该字段的 interrupted 运行回退默认值而非报错，避免历史中断会话升级后无法恢复。
+- 新增智能体请求队列（Phase 1/2/Steer）：同一线程运行中提交的新请求默认持久化排队，并按 FIFO 顺序自动执行；新消息或已有排队项也可设为 Steer，在当前步骤结束后的下一次模型调用前停止旧 Graph，再复用 completed 接力优先执行。支持实时查看排队位置、单条取消和刷新恢复，也可通过 `reject` 策略保持“不能立即执行就拒绝”。聊天、Agent Call 和评估统一接入该队列，前端会分开展示排队请求与当前回复，并修复连续请求交接时的流状态和消息顺序问题；排队请求区域改为紧贴输入框的附属列表，移除冗余标题与表格式分割线，保留顺序和删除操作但弱化次要信息。同步 Agent Call 遇到忙线程时会直接返回拒绝结果，不再因缺少 `run_id` 进入等待逻辑并返回 500。failed/cancelled 时已有积压请求会明确进入暂停状态，用户可手动继续 FIFO 队头；队列为空后的新请求可正常执行。interrupted 必须先完成 resume，前端会禁用普通消息发送，后端也会在持久化 Message/Request 前返回 `run_interrupted` 冲突，不能被继续动作或绕过前端的请求破坏恢复顺序；completed 自动接力的故障窗口会在 worker 重试和启动恢复时补齐。Phase 2.1 进一步使用 Conversation 行锁串行化 intake、resume、continue 和自动接力，保证并发 enqueue 仍严格遵守 FIFO；`pending` AgentRun 作为持久化投递意图，completed job 重试和 worker startup 会优先重新投递已有 run，不再依赖重启修复提交后 ARQ 投递失败；终态写入增加单赢家语义，后到的 cancelled/failed/completed 不再造成 AgentRun、Message 与 SSE 状态分裂；request_id 幂等绑定 uid、agent、thread、source 和 queue policy，跨作用域复用返回结构化冲突。并发 `reject` 现在会在锁定 FIFO 队头后确认当前请求确实能够立即派发，竞争失败的请求原子转为 rejected；终态 run 缺少 `finished_at` 时显式暴露数据不变量，实时进入 interrupted 后也会立即刷新队列提示。Request SSE 恢复时会复用已有连接，开发容器也会在有长连接时按时完成热重载。审批中断改为在消息和 Agent 状态写入事件流后再发布中断终态，resume 时保留排队 Request SSE；交付物按 `present_artifacts` 所在对话渲染，避免连续审批必须刷新和后续消息错位。Steer 增加无工具模型轮次的 `aafter_model` 兜底检查，含工具调用时仍等待完整批次，并由 worker 接力和启动恢复保证持久化意图不丢失。新增《Agent 请求队列与调度设计》文档，说明调度目标、策略、状态、异常处理和当前范围。补充队列、取消、暂停恢复、消息排序、流交接及接口测试。
+  普通发送遇到 `run_interrupted` 冲突时会从 checkpoint 重载中断载荷、恢复审批框，并回填后端未持久化的文本与图片草稿；恢复过程按线程和请求版本隔离，避免旧请求污染当前草稿或重新显示已处理的审批，状态读取失败时明确提示刷新重试。
+- 知识库列表直接读取 PostgreSQL 中的概览和持久化统计，不再为展示卡片同步初始化 Milvus 等知识库实例，避免首次进入知识库页面时卡片长时间不可点击。
+- 新增知识库 external API 与 `yuxi kb` 查询类命令：后端在 `/api/knowledge/databases/external/*` 下暴露列库、文件搜索、检索、打开和文件内查找接口，统一走认证身份校验；CLI 新增 `yuxi kb list/files/query/open/find`，补充后端 external API 集成测试与 CLI client/命令测试。管理端同步新增 `GET /api/knowledge/databases/{kb_id}/documents/search`，复用底层文件名搜索能力供前端调用；知识库详情页工具栏新增「搜索文件」按钮，打开命令面板式弹窗（与历史对话搜索弹窗同风格），输入关键词按文件名搜索并在结果列表展示状态/大小/更新时间，placeholder 明确标注仅匹配文件名、不搜索文件内容，点击结果可直接打开文件详情。搜索请求增加序号校验，连续回车与快速重搜时丢弃过期响应，避免后发先至覆盖当前关键词结果。文件名搜索改为数据库侧按 filename/status 过滤、`updated_at desc` 排序与 count 统计，避免大知识库超过仓储单页上限时静默漏结果；管理端搜索先做当前用户可见性校验再判断文档能力，external open/find 统一清晰处理只读源与预期参数错误；CLI 查询结果从 `metadata.score` 读取并展示检索得分。
+- 新增 `download_kb_file` 知识库工具：通过 `file_id` 调用 `knowledge_base.get_file_download(variant="original")` 从 MinIO 拉取原始二进制（pdf/docx/xlsx 等），落盘到沙盒 `outputs` 目录并返回沙盒内可见的虚拟路径，供后续代码工具以文件对象方式读取（`openpyxl.load_workbook`、`pdfplumber.open` 等），弥补 `query_kb`/`open_kb_document` 只返回文本切片、丢失原始文件结构的不足。复用会话可见知识库校验与 `ocr_parse_file` 的落盘范式，支持 `save_as` 指定文件名（剥离目录防穿越，重名追加 `_N` 后缀），工具只搬运不解析、不自动登记交付物。工具已登记到 knowledge-base 内置 Skill 的 `tool_dependencies`，并在 SKILL.md 可用工具段补充说明；只读源拦截下沉到 `manager.get_file_download` 内部，与 `open_document`/`find_in_document` 落点一致，工具/router/CLI 所有调用方统一获得 dify 等只读检索源的拦截；返回的 `size_bytes` 与落盘统一用下标访问 `data["content"]`，避免回退掩盖契约异常。
+- 内置网页搜索工具新增豆包联网搜索支持：新增 `WEB_SEARCH_PROVIDER`（`doubao`/`tavily`）与 `DOUBAO_SEARCH_API_KEY` 配置，未显式指定时按已配置的 API Key 自动识别 provider；两种 provider 统一注册为工具名 `web_search`，`deep-research` Skill 依赖同步从 `tavily_search` 改为 `web_search`。
+- 只读用户知识库开放图谱与知识导图查看：非管理权限用户也能打开“知识图谱”“知识导图”页签查看已构建内容，但隐藏配置抽取器、开始索引、生成/重新生成/增量更新等写操作；空状态提示改为等待管理员构建。
+- 模型供应商编辑表单优化：API Key 密码框关闭浏览器自动填充识别，避免被误判为登录用户名/密码；供应商处于停用状态时，保存按钮拆分为“仅保存”与“保存并启用”，后者保存后自动启用，避免漏开启。
+- 新增内置模型供应商 OpenCode Go（`opencode-go`），Base URL 与模型发现地址指向 `https://opencode.ai/zen/go/v1`，配置方式与 OpenCode 一致。
+- 模型供应商列表优化：卡片移除右下角启用/禁用开关，供应商按启用状态拆分为「已启用 / 未启用」两组展示；已启用供应商保留 Base URL、能力与「管理模型」入口，未启用供应商只展示图标与名称的小卡片，不再展示 Base URL 与管理模型按钮。
+- 知识库卡片补充共享权限标签：参考 Skill / 智能体卡片，在现有类型与嵌入模型标签之外新增共享范围标签（如「只读全局」），与 Agent 卡片保持一致的灰色样式。
+- 收敛 Ruff CI 行为：Pull Request 与 push 到 main 均只检查、不修改仓库内容，发现问题直接标红并提示本地运行 `make format`；工作流仅保留 `contents: read` 权限，不再自动提交或创建修复 PR。
+- 优化知识库详情页自动轮询：轮询从固定 1s `setInterval` 改为链式调度，等上一轮知识库信息与文件列表请求全部返回后再排下一轮，慢接口下不再出现请求堆积重叠；全库 `processing_count` 持续不变时按退避因子拉长间隔（上限 30s），连续多轮无进展即自动停止轮询；离开详情页时 `onUnmounted` 主动清理定时器。
+- 统一工具调用展示名称映射：知识库工具显示名改为后端 `display_name` 定义，前端拉取完整工具元数据；工具卡片与折叠摘要按「工具列表 display name → middleware 兜底映射 → 工具 id」统一展示。
+- 侧边栏对话列表新增 Thread 运行状态：以 `AgentRun` 为事实来源，后端把每个线程最新顶层 chat/resume Run 聚合成 `thread_status`（进行中显示 loading、已终态未查看显示 ready 点、已查看或无 Run 为 done），列表接口一次窗口查询完成聚合、不逐项请求；`Conversation` 新增 `last_viewed_run_id` 持久化查看边界，`POST /api/chat/thread/{id}/viewed` 幂等标记已读。前端打开线程、当前线程收到终态/中断事件时自动标记已读，发送或恢复 Run 时置为 loading，侧边栏可见时低频轮询刷新后台线程状态；历史线程上线时按各自最新顶层 Run 一次性回填为已读，新建线程写入未读哨兵避免回填误清新产生的未读点。
+- 修复 Thread 运行状态两个正确性问题：终态/中断事件仅在事件线程等于当前打开线程时才自动标记已读，后台线程完成保留 ready 点直至用户打开；无 chat/resume Run 的历史会话（agent_call / agent_evaluation 调用、从未对话过的线程）在回填时写入未读哨兵，使回填探测条件收敛为 false，避免每次启动都重复对 `agent_runs` 做全表聚合。
+- 优化侧边栏对话列表操作渐隐：`.actions-mask` 三态（默认/悬浮/激活）渐隐统一为线性延伸至操作按钮左边缘（距右缘 28px）再转为实色，修复悬浮时渐隐铺满整条遮罩导致按钮下方文字残留鬼影、以及三处渐隐宽度不一致的问题。
+- 修复 OpenAI 兼容网关（如 aiagent.cspmmed.com/yuanzhi-m1）偶发零 chunk 空流与 `choices=null` 的错误：流式 `_astream/_stream` 捕获到 0 chunk 或 `TypeError: choices=null` 时，通过 ContextVar 阻断递归，按「绑定 instance 正常 ainvoke → 剥离显式 tools/response_format → 构造无 tools 裸 ChatOpenAI → 裸实例最小调用 → raw httpx POST」五步兜底退化为非流式单块请求并包装为 AIMessageChunk 返回；终极兜底还会把网关返回的完整业务错误体（HTTP 200 + code/message + choices=null）dump 到 stderr，便于排查真实网关返回。另外对 SiliconFlow/百炼等厂商在 tool_call 续片中下发空串 name/id 做了归一化为 None，避免 LangGraph v3 后值覆盖丢失首片的 name/id，导致工具结果无法关联和工具停留在"进行中"状态。
+
 
 ## v0.7.1 (2026-07-17)
 
@@ -12,6 +123,7 @@
 - 修复沙箱执行边界：每个动态 Docker 沙箱使用只与 provisioner 相连的独立网络，沙箱之间不能互访，也不再加入业务 `app-network` 或发布随机宿主机端口；provisioner 重启后会重新接入已有沙箱网络，清理时只删除自身创建且标签匹配的网络。API/worker 使用至少 32 字符的 `SANDBOX_PROVISIONER_TOKEN` 调用 provisioner，并通过认证代理访问沙箱文件与命令接口，代理在应用生命周期内复用 HTTP 连接池。生产 Compose 同时移除 PostgreSQL 和解析服务的宿主机端口，阻断沙箱对其他租户、业务数据库、对象存储和无鉴权 provisioner 的横向访问。
 - 公开头像和 Agent 图片改用同源 `/minio/public/...` 地址，由开发 Vite 和生产 Nginx 只读代理 `public` bucket；MinIO `9000` 对象 API 与 `9001` 管理控制台无需对外开放，私有 bucket 不进入前端代理。
 - Markdown 渲染兼容历史 PDF 解析结果中的 `http(s)://<host>:9000/public/...` 图片链接，在展示时转换为同源 `/minio/public/...`，无需批量重写 MinIO 中已有的 `.md` 文件或重新解析文档。
+
 
 ### 破坏性变更
 
@@ -23,11 +135,6 @@
 
 ### 开发记录
 
-- 修复模型回答中以引号开头的 Markdown 加粗标记无法解析、页面直接显示 `**` 的问题；渲染前仅规范化代码区域以外的异常加粗，不改动代码块、行内代码及正常 Markdown。
-- 修复知识图谱构建中失败 Chunk 堵塞后续批次、任务存在剩余项却显示成功，以及完整索引仍被历史失败任务标记为失败的问题；LLM 图谱抽取支持配置请求超时和超时重试，默认 180 秒并重试 1 次，只重试模型超时错误
-- 修复 Book 分块策略未按配置长度聚合正文的问题：章节层级识别改为扫描完整文本行，避免随机抽样漏掉稀疏标题并确保同一文件重复解析结果一致；识别后先形成带完整标题路径的语义段，再按 `chunk_token_num` 聚合同一小节的连续正文；超长小节的后续片段重复章、节、小节标题，重叠比例按完整正文行计算；同时扩大书籍长目录与正文起始标题的匹配范围，避免目录和教材正文被拆成大量“标题 + 单行残句”的短 Chunk；文件详情中的片段卡片增加近似 Token 数，默认展示六行，点击后可跨栏展开完整内容并保留原始换行。已有文件需重新解析后生效。
-- 统一知识库与网络搜索溯源（2026-07-16 业务验收通过）：知识库 Query/Find/Open 结果增加稳定来源标识，前端兼容 `query_kb` 新结果结构并与网络搜索共用来源编号；普通大小的网络搜索结果也会在进入模型上下文前逐条补充与完整 URL 相同的 `citation_source`，减少正文采用网络资料却漏标 URL 的情况；回答正文中的真实 `<cite>` 来源渲染为圆形编号，点击后在当前阅读位置右侧显示对应知识片段或网页摘要，模型虚构的来源标识不会生成有效引用，复制回答时会移除内部 `<cite>` 协议标记；正文编号只分配给实际引用并按首次出现顺序排列，知识库与网络来源列表统一以圆形编号和“候选”区分实际引用状态，各分组分别显示引用数和检索数，打开来源面板后两类结果默认展开；`open_kb_document` 的大范围结果作为全文阅读窗口处理，未被正文引用时不混入来源候选，被引用时标注为文档阅读范围和准确行号；来源片段中的内部排序值不再误称相似度；检索测试页保留图融合前的原始检索分，并按模式分别显示向量相似度、BM25 相关性分或混合检索分，图融合排序分与重排分独立展示，仅由图检索补充召回的结果单独标识来源，不再混用 `score` 和 `distance` 的底层字段名称；流式回答完成后立即显示点赞、复制和实时来源，无需刷新页面；当前会话显式配置知识库时，事实性问题优先检索知识库，知识库不足或需要最新信息时仍可补充网络搜索；用户明确要求同时参考知识库和互联网时，应综合两类有效证据，未采用某类结果时说明原因；字典型工具结果统一按 JSON 持久化，大型知识库或网络搜索结果转存沙箱前生成有大小上限的引用清单并随工具消息持久化，刷新后直接恢复来源，不再依赖 `read_file` 行号文本或被截断的 JSON。
-- 完善 AgentRun 取消语义：用户停止生成后，Worker 会销毁当前运行对应的临时沙箱以终止正在执行的命令，同时保留挂载的工作区、上传文件和输出文件；状态面板将最后一次计划中未完成的待办显示为“已取消”，不再保留误导性的运行中动画。
 - 修复 Milvus 知识图谱子图查询忽略 `max_depth` 的问题：查询会按请求深度展开路径，并完整返回路径中的中间节点与关系；排除 Chunk 时同时限制整条路径，避免通过 Chunk 间接扩展。路径结果继续遵循现有节点和边数量上限。
 
 - 修复线程文件接口的同步文件 I/O 阻塞：交付物预览仅异步读取媒体类型识别所需的 512 字节文件头，不再同步加载完整文件；线程文件全文读取和目录扫描下沉到工作线程，避免大文件或大目录并发访问时阻塞 API 事件循环。
@@ -39,15 +146,9 @@
 - 统一用户菜单的设置入口：管理员与普通用户均显示“设置”，打开后默认进入账户设置；管理员专属的基本设置、用户管理等标签继续按原权限展示。
 - 工作区 `agents` 目录新增 `USER.md` 与 `MEMORY.md` 上下文文件，并与 `AGENTS.md` 一起在 Agent 运行开始时加载；三个默认文件首次创建时均写入对应标题和说明，不再生成空文件，已有内容保持不变。
 - 新增 Summary 上下文压缩实时状态流式同步：`YuxiSummarizationMiddleware` 触发压缩时通过 `langgraph.config.get_stream_writer()` 推送 `yuxi.context_compression` 自定义事件（started/completed/failed），复用 DeepAgents 已有 `_summarization_event` 作为完成数据源；`base.py` 通过 `astream_events(version="v3")` 的 `CustomTransformer` 透传 custom 流，`chat_service`/`agent_run_service` 将事件映射为 `context_compression` chunk 并透传到前端；前端收到 `started` 时将"正在生成回复"加载态文案切换为"正在压缩上下文"，压缩结束（`completed`/`finished`）即切回，不额外渲染分隔符、不保留压缩完成态。为避免摘要 LLM 调用的 token 流被 LangGraph messages stream 捕获并广播成 phantom 摘要消息，重写 `_create_summary`/`_acreate_summary` 在摘要模型 invoke 的 config 上挂 `TAG_NOSTREAM`，让流式层在源头跳过该调用，主 messages 流天然只含用户可见回复，无需 `chat_service` 下游过滤（参考 DeerFlow 实现）。异步 L2 压缩路径的 `_aoffload_to_backend` 与 `_acreate_summary` 改回 `asyncio.gather` 并发执行，与 DeepAgents 父类一致，避免串行等待一次文件 I/O 与一次摘要 LLM 调用；两路复用 `_SUMMARY_SANITIZED_MESSAGES` 的 id 缓存。L1-only 调用若仍触发 provider context overflow，会回落到 L2 summary 后重试；`summary_tool_result_token_limit` 默认改为 300，并同时作为 L1 工具结果 offload 阈值和预览上限，L2 只消费 L1 视图，不再对工具结果做第二轮 offload；L2 摘要模型的待摘要历史输入上限改为与 `summary_threshold` 对齐，避免固定 4000 token 裁剪丢失早期历史；新增 `summary_l2_trigger_ratio` 管理 L1 后进入 L2 的比例阈值，默认 `0.4`。
-- 修复 `YuxiSummarizationMiddleware._should_summarize` 在部分 langchain 版本下因 `_lc_helper` 缺少 `_trigger_clauses` 属性而抛出 `AttributeError`、导致 Agent 对话直接失败的问题：改用 `getattr` 安全访问，与同文件 `_entry_trigger_tokens` 已有写法保持一致；属性缺失时不触发摘要，行为与无触发条件等价。
-- 修复思维导图生成时报错"知识库中没有文件"的问题：`_list_mindmap_files_page` 原依赖 `list_documents(files_only=True)` 仅查询根目录下的文件，当知识库文件存放于子文件夹时返回空列表；改为直接使用 `list_by_kb_id` 获取全库记录后过滤非文件夹文件，确保能正确获取所有文件用于思维导图生成。
-- 修复 `YuanZhi:yuanzhi-m1` 等通过 `aiagent.cspmmed.com` 网关访问的模型在 0.7.1 对话中长时间无有效回复的问题：
-  - 根因是网关偶发返回 `choices=null`，LangChain 的 OpenAI 兼容层抛出 `TypeError: Received response with null value for 'choices'`；由于 0.7.x 新增的 `ModelRetryMiddleware` 默认对任何 `Exception` 都重试 2 次（合计 3 次请求），最终把异常包装成 AIMessage 输出为 `Model call failed after 3 attempts with TypeError …`，表现为「等很久才得到一条错误回复」。
-  - 修复分两层：① 在 `_ToolCallChunkFixChatOpenAI` 里把 `choices=null` TypeError 和「零 chunk 空流」走同一套 `ainvoke` 兜底（即 0.6.2 的非流式行为），若兜底仍报同样错误则再降级为无 tools 的普通聊天；② 将 ChatbotAgent / SubAgentBackend 的 `ModelRetryMiddleware.retry_on` 收紧为仅对 `APITimeoutError / APIConnectionError / RateLimitError / InternalServerError / ServiceUnavailableError / UnprocessableEntityError / 5xx APIError` 等瞬时 API 异常重试，避免对结构性响应损坏的 `TypeError / RuntimeError` 反复浪费重试窗口。
-  - 进一步加固兜底链路（2026-08-19 补充实测修复）：当网关在压力下偶发返回 **HTTP 200 + 业务错误体**（响应 JSON 含 `code/message/data` 字段但 `choices=null`，LangChain 仍按正常响应解析导致 choices=null TypeError）时，新增「Step ⑤ 终极兜底」：在 clone 裸 ChatOpenAI 仍失败的情况下，直接用 `httpx.AsyncClient` 发送原始 `/chat/completions` POST 请求并自行解析 JSON。若响应中包含业务错误的 `code/message`，则将其拼入 RuntimeError 提示（替代晦涩的 choices=null TypeError），方便快速定位网关侧问题；若响应为正常 `choices[].message.content` 格式则直接提取为 AIMessage 继续返回，只要 HTTP 层响应就能拿到回答或明确错误。模型参数（`model` / `temperature` / `base_url` / `api_key`）通过 `_resolve_openai_base_url` 与 `model_dump(by_alias=True)` + 手挑字段 fallback 完整继承，确保 Step ⑤ 调用与原 ChatOpenAI 实例的网络参数完全一致。
-- 修复 Milvus 连接异常处理中的 `AttributeError`：pymilvus 3.x 中 `connections` 为 `Connections` 实例而非模块，`connections.MilvusException` 不存在导致错误处理本身崩溃并掩盖真实 `ConnectionNotExistException`；改为从 `pymilvus.exceptions` 显导入 `MilvusException` 与 `ConnectionNotExistException`，并新增 `_ensure_connection` 方法在使用前检查并重建已断开的连接。
-- 修复 Milvus `db` 模块操作报 `ConnectionNotExistException: should create connection first` 的问题：`db.list_database()` / `db.create_database()` / `db.using_database()` 默认使用 `"default"` 连接别名，但代码用自定义别名（`milvus_xxx` / `milvus_graph_xxx`）连接，导致 `db` 操作找不到连接；改为在所有 `db` 模块调用中显式传入 `using=self.connection_alias`，`milvus.py` 与 `milvus_graph_vector_store.py` 同步修复。
 
+- 知识库文件列表新增文件级 Token 内容量与创建人头像、用户名展示，内容量悬浮可查看 Chunk 数量；创建人复用全局用户头像解析规则，长用户名省略且悬浮可查看完整名称。
+- 知识库编辑配置表单移除“自动生成问题”开关，不再由前端编辑或提交该配置。
 - 知识库详情页新增整页内容加载态：切换或首次进入详情时，在知识库信息返回前仅展示居中 loading，避免标题、标签页和文件区域先渲染旧数据或空状态。
 - 修复知识库文件处理中频繁刷新时，旧目录请求覆盖当前子目录列表并造成列表抖动的问题。
 - `InfoCard` 新增统一的 `card-more-action-corner` 菜单插槽，并在组件内部固定渲染横向三点按钮；更多操作从卡片绝对定位改为进入 header 的正常 flex 布局，与图标、标题和 `status` 共享同一垂直中心线，业务页面只能提供菜单内容；智能体、知识库和用户管理卡片均改为复用该组件与菜单能力，用户部门/角色标签使用现有 `status` 插槽展示在标题区右侧，菜单图标与文字使用统一行高居中，知识库菜单支持复制 ID、直接打开编辑弹窗，以及确认后删除并刷新列表。
@@ -62,7 +163,7 @@
 - 模型供应商管理前端开放 Anthropic provider type：Provider Type 下拉仅保留 OpenAI Completions API 与 Anthropic Messages API 两种可选项，保存值继续使用后端枚举，并在供应商卡片中展示友好类型名称。
 - 优化 Agent 状态面板子智能体弹窗：弹窗消息列表复用对话消息渲染路径，打开运行中的子智能体时会展示主 run SSE 已路由到 child thread 的流式消息，并在生成中保持与主对话一致的处理态；修复当前 run 的历史半成品消息与 ongoing 流式片段叠加导致同一个子智能体在主对话中重复展示的问题，子智能体状态查询工具不再渲染成独立 Agent 卡片，弹窗会随子智能体条目补齐 run_id 后订阅对应 SSE，并复用主对话的流式平滑输出与底部跟随滚动控制；已完成的子智能体改为直接读取持久化 Message 历史，不再从 Redis run event 重放渲染。
 - 增强异步子智能体 `subagent_status`：状态查询会从子 run 的 Redis 事件流反向提取最近 3 条可读进度摘要，并在工具卡中优先展示，终态结果读取语义保持不变；同时移除模型侧 `subagent_events` 工具，Redis 原始事件流继续仅供运行基础设施与前端 SSE 使用，避免包含重复 metadata、query 与嵌套 payload 的事件信封进入模型上下文并被写入 `large_tool_results`。
-- 优化任务中心（Tasker）定位为「后台作业实体 + 只读进度面板」。前端修正失效的任务类型标签、状态判断收敛、任务详情补充参数/结果，并把轮询收敛到 store 修复抽屉关闭后角标不更新；后端 `TaskContext` 暴露 `payload` 消除私有穿透，进度更新按增量节流降低写放大，新增终态任务保留上限自动裁剪内存与数据库，`_load_state` 恢复历史任务使任务中心重启后仍可见。修复运行中任务关闭时 `shutdown()` 持有状态锁等待 worker、worker 又等待同一锁写入取消状态形成的死锁；生命周期操作改用独立锁串行化，等待 worker 前释放状态锁，并区分服务关闭取消与任务协作式取消，确保关闭能够完成且普通任务取消不会损失 worker。后台任务增加默认 6 小时且可通过 `TASKER_DEFAULT_TIMEOUT_SECONDS` 调整的执行上限，入队时可按单任务覆盖；超时会取消并等待业务协程清理后释放 worker，知识库文件与评估任务同步退出“处理中”状态。
+- 优化任务中心（Tasker）定位为「后台作业实体 + 只读进度面板」。前端修正失效的任务类型标签、状态判断收敛、任务详情补充参数/结果，并把轮询收敛到 store 修复抽屉关闭后角标不更新；取消操作提交后提示“取消请求已提交”，不再将请求受理误报为任务已取消。后端 `TaskContext` 暴露 `payload` 消除私有穿透，进度更新按增量节流降低写放大，新增终态任务保留上限自动裁剪内存与数据库，`_load_state` 恢复历史任务使任务中心重启后仍可见。修复运行中任务关闭时 `shutdown()` 持有状态锁等待 worker、worker 又等待同一锁写入取消状态形成的死锁；生命周期操作改用独立锁串行化，等待 worker 前释放状态锁，并区分服务关闭取消与任务协作式取消，确保关闭能够完成且普通任务取消不会损失 worker。后台任务增加默认 6 小时且可通过 `TASKER_DEFAULT_TIMEOUT_SECONDS` 调整的执行上限，入队时可按单任务覆盖；超时会取消并等待业务协程清理后释放 worker，知识库文件与评估任务同步退出“处理中”状态。
 - 知识库访问能力迁移为内置 Skill：新增 `knowledge-base` Skill，绑定 `list_kbs`、`query_kb`、`find_kb_document`、`open_kb_document`、`get_mindmap` 等知识库工具；内置 Agent 不再默认挂载知识库工具，改为读取并激活 Skill 后按需加载，同时保留 `knowledges` 作为知识库资源范围与权限边界。Agent 配置页在启用知识库但显式未选择 `knowledge-base` Skill 时实时展示提示，保存时不阻断。修复 Skill 依赖工具的可执行性：`create_agent` 中「模型可见工具」与「ToolNode 可执行工具」是两套，仅靠 `awrap_model_call` 动态追加工具只会绑定给模型、不进 ToolNode，导致激活 Skill 后调用 `list_kbs`/`query_kb` 报 `not a valid tool`；现由 `resolve_configured_runtime_tools` 统一把所有可见 Skill 依赖的本地工具随基础工具一起注册进 ToolNode（可执行），`SkillsMiddleware` 运行期再按 Skill 激活状态门控模型可见性（保持按需加载）。新增 `search_file` 工具支持按文件名关键词跨/指定知识库搜索文件，并已加入 `knowledge-base` Skill 的依赖工具；其分页统计基于全量扫描结果计算 `total`/`has_more`，避免按 `limit+offset` 截断导致计数失真。
 - 增强知识库工具结果豁免：`open_kb_document` 工具结果加入 Summary 卸载豁免名单，避免大文档窗口被摘要后丢失上下文。
 - 新增 Yuxi Python CLI 首版底座：新增独立 `packages/yuxi-cli` 包，提供 `remote add/use/list/ping`、`login --browser`、`login --api-key`、`whoami`、`status`、`logout`；配置统一写入 `~/.yuxi/config.toml`，remote URL 只保留实例入口并派生 `/api` 请求路径。后端新增 `/api/auth/cli/sessions` device flow 授权接口与 `cli_auth_sessions` 持久表，浏览器确认后为当前用户创建一次性返回的 API Key；新增公开 `/api/system/discovery` 声明服务端版本、API 前缀、CLI 能力和关键端点，CLI 登录前校验服务端版本至少为 `0.7.1`（`0.7.1.dev*` 按 release tuple 兼容）及对应能力；前端新增 `/auth/cli/authorize` 授权确认页。补充 CLI 本地单测与后端服务/路由单测。
@@ -71,17 +172,19 @@
 - 收敛认证模块命名：CLI 浏览器授权路由合并到 `auth_router.py`，授权会话服务迁移到 `auth_service.py`。
 - 为 CLI 知识库上传补齐后端接口边界：discovery 新增 `cli.kb_upload` 能力声明；普通文件上传接口在传入 `kb_id` 时先校验知识库存在且支持文档，校验通过后才读取文件或写 MinIO；新增同步 `POST /api/knowledge/databases/{kb_id}/documents/add`，用于把已上传的 MinIO 文件添加为知识库文档记录但不解析、不入库、不进入 Tasker；新增 `GET /api/knowledge/databases/{kb_id}/documents/exists?filename=...`，用于上传前按文件名或相对路径检查知识库内是否已有同名文件；旧 `/documents` ingest 入口保留兼容，但在 enqueue 前补充空 items、非 MinIO URL 与缺失 content hash 的请求级校验。
 - 新增 `yuxi kb upload` 上传命令：默认仅包含 `.md/.txt/.docx/.html/.htm`，省略 `--kb-id` 时会从 remote 拉取并只展示支持文档上传的知识库，支持非全屏的方向键单选知识库与多选文件类型；支持 `--include-ext/--exclude-ext` 与 `--concurrency` 控制本地并发队列，并发默认 10、上限 300；交互终端上传阶段显示进度条，非交互输出保留文本进度；每个并发单元默认会先按相对路径调用 `/documents/exists` 检查知识库中是否已有文件，存在则直接跳过，传入 `--force-upload-file` 时跳过该预检并完全依赖上传接口的重复文件校验；单文件上传成功后立即调用 `/documents/add` 添加该文件记录，不触发解析/OCR/入库；目录上传通过 `source_paths` 保留相对路径，后端创建文件记录时使用该路径作为展示文件名以保持前端目录层级；上传接口返回“同内容文件已存在”时按已上传过跳过，不再作为错误展示；大批量上传调度改为有界提交，避免数十万文件时一次性创建全部 future 导致资源峰值过高。
-- 发布 `yuxi-cli` 到 PyPI，并新增 GitHub Release 触发的 PyPI Trusted Publishing 工作流；文档新增命令行工具使用说明；CLI 运行访问 remote 的命令前会先输出当前 CLI 版本、remote 名称和 URL。
+- 发布 `yuxi-cli` 到 PyPI，并新增 GitHub Release 触发的 PyPI Trusted Publishing 工作流；文档新增命令行工具使用说明；CLI 运行访问 remote 的命令前会先输出当前 CLI 版本、remote 名称和 URL。CLI 输出测试在断言前去除 ANSI 样式，避免 GitHub Actions 的强制彩色输出拆分版本号、URL 与参数名并误阻塞 PyPI 发布。
 - 修复知识库文件入库/解析成功却被统计为失败（#793）：成功的文件元数据会固定携带 `error: None`，而后台任务此前以「结果中是否存在 `error` 键」判定失败，导致成功项也被计入失败数并在全部成功时仍抛出「处理完成，失败 N 个」。改为统一通过 `_is_failed_item` 按「显式 `status == failed` 或非空 `error`」判定，覆盖入库、解析、单独解析/入库三处统计。
 - 修复 Windows 初始化脚本自动生成 JWT 配置失败（#804）：`init.ps1` 改用 Windows PowerShell 兼容的 `RandomNumberGenerator.Create().GetBytes(...)` 生成随机字节，避免旧 .NET 环境缺少 `RandomNumberGenerator.Fill()` 导致按 Enter 自动生成时报错。
 - 优化 Bash 与 Windows 初始化脚本：目标镜像标签已存在时直接跳过重复拉取；已有 `.env` 会逐项检查必填 API Key、JWT 密钥、实例 ID 和 Sandbox Provisioner Token，缺失或为空时提示输入，安全配置支持回车生成，并避免写入重复键。
 - 优化知识库文件列表状态流转与文件预览边界：`uploaded/parsed/error_parsing/error_indexing` 状态分别展示解析、入库或重试操作；源文件预览与解析后的 Markdown 查看分离，txt/图片/Markdown/HTML/PDF/代码类按源文件类型预览；Office 源文件仅支持 `.docx/.pptx`，点击预览时按需生成并缓存 PDF 预览内容，由同一个预览接口直接返回，不再把解析 Markdown 产物当作源文件预览。
 - 收敛知识库分块策略选项来源：后端以单一 `CHUNK_PRESETS` 配置派生 preset id、描述和选项列表，并新增 `/api/knowledge/chunk-presets`；前端分块策略选择器改为通过接口读取选项，避免前后端重复维护同一份文案。
 - 优化大规模知识库文件列表加载：知识库详情接口默认不再返回全量 `files`，新增按 `parent_id/path_prefix/page/page_size/status` 查询的轻量文件列表接口；前端文件管理页改为目录懒加载与服务端分页，后端按 `source_path`/路径型文件名聚合虚拟目录，列表项只保留交互所需字段，顶部统计改用后端聚合结果，避免数十万文件场景下前端全量建树和传输压力。工作区知识库文件浏览统一改用同一套分页懒加载查询，支持真实目录和虚拟目录页码分页，非文档型知识库不再出现在工作区文件源中；文件浏览组件和后端列表接口均不再承载文件名搜索，后续搜索能力由独立后端接口和组件实现；文件列表展示抽出共享 `FileBrowserTable`，知识库详情和工作区共用展示层，并移除原知识库文件列表拖拽移动入口。
+  修复二级目录点击“全部文件”仍沿用当前 `parent_id` 的问题，显式根目录导航会清空目录上下文并重新加载根目录。
 - 优化知识库启动元数据加载：服务启动时不再把全部 `knowledge_files` 记录加载进 `self.files_meta`，文件解析、入库、预览、下载、打开内容等单文件操作改为按 `file_id` 从数据库懒加载；文件状态流转改为通过数据库窄字段更新和状态条件更新完成，移除进程内处理队列修复逻辑，避免 api/worker 多进程下出现虚假的状态修复；文件统计刷新改用数据库聚合，文件大小补全从启动阶段移入显式统计修复任务，并收敛处理参数合并日志，避免大规模文档场景下启动内存和日志压力随文件数线性放大。
 - 调整知识库待处理统计卡行为：文件管理顶部“待解析/待入库”统计卡从状态筛选改为提交对应后台处理任务；新增按待处理状态批量解析/入库接口，任务内按 500 条游标分页读取文件 ID，避免前端一次拉取和提交海量 ID；显式选中文件解析/入库接口增加 1000 个 ID 的单次上限。
 - 修复大规模知识库统计修复失败：`repair_missing_file_stats` 不再对未入库文件查询 chunk 表，未入库文件残留的 chunk/token 统计会归零；chunk repository 的批量 `IN` 查询统一分批执行，避免 asyncpg 单条 SQL 参数超过 32767。
 - 优化思维导图构建接口设计，支持增量构建和更新：新增 GET /mindmap/diff 接口检测文件变更，POST /mindmap/generate 新增 incremental 参数支持增量更新；纯删除场景无需 AI 调用（递归树手术），新增文件时 AI 整合进现有分类结构；思维导图文件加载改为显式 repository 查询，增量 diff 会按已追踪 file_id 补查分页外文件，避免把分页文件列表误当全量文件集；前端导图 Tab 新增"增量更新"按钮和变更数量 badge。修复删除文件后知识导图仍展示旧内容：单文件删除接口成功后调用 `remove_file_from_mindmap`、批量删除接口成功后调用 `batch_remove_files_from_mindmap`，同步移除导图快照中对应叶子节点，无需用户再手动增量更新。
+  导图文件查询改为覆盖知识库全部目录中的非文件夹记录，根目录为空但子目录有文件时也可正常生成和增量检测。
 - 优化文档结构与智能体运行说明：项目简介去除对 LangGraph 具体版本的强调；中间件文档按当前内置 Agent 链路重写，补充知识库工具、Skills 激活、附件/文件系统、子智能体 task、Summary 上下文压缩与工具结果卸载机制；知识库文档补充知识导图与示例问题生成机制；Langfuse 集成文档从“智能体开发”移动到“高级配置”分组。
 - 移除知识库普通上传接口遗留的 `allow_jsonl` 参数，上传类型判断统一依赖 `SUPPORTED_FILE_EXTENSIONS`；评估数据集 JSONL 继续通过独立评估接口上传。
 - 修复 Dependabot esbuild 告警：web 与 docs 统一锁定 `esbuild@0.28.1`，docs 同步升级 Vite/Vue 插件 override 并固定 pnpm 版本，避免旧锁文件继续解析到存在漏洞的 esbuild 版本。
@@ -98,10 +201,11 @@
 - 新增 Agent 内置 `ocr_parse_file` 工具：只允许解析 `/home/gem/user-data/{workspace,uploads,outputs}` 下的沙盒虚拟路径文件，使用指定或系统默认 OCR 引擎生成 Markdown，并把结果写入 `outputs/ocr/*.md`；工具返回结果文件路径、字符数和短预览，不写入知识库 MinIO，也不创建知识库文件记录。
 - 收敛 Agent Invocation 服务边界：新增 `agent_invocation_service.py` 承接 agent-call/eval 的外部调用语义、同步等待、异步响应与 OpenAI-compatible 响应装配；`agent_invocation_router.py` 收敛为 HTTP 适配层，`agent_run_service.py` 只保留通用 AgentRun 生命周期能力，`subagent_run_service.py` 改为调用公开 AgentRun 创建 API，不再穿透私有函数。
 - 修复 Agent 状态读取与消息落库在重新读取 LangGraph checkpoint 时未传入运行时 context 的问题，避免主智能体或子智能体线程因系统默认模型已不可用而查询状态/保存历史失败；模型供应商管理页新增默认模型保护，阻止删除、停用默认模型所属供应商或移除当前默认模型。
+- 评估数据集自动生成支持断点续跑：生成过程中按 `YUXI_DATASET_PERSIST_BATCH_SIZE`（默认 1）批量持久化已生成的题目，任务失败或中断后可从已持久化进度继续生成；新增 `POST /api/evaluation/databases/{kb_id}/datasets/{dataset_id}/resume` 接口与前端"继续生成"按钮。修复生成器先收集后产出导致批量持久化在生成中途不生效的问题：改为 worker 产出即流式回报、消费端按 attempt_no 重排输出，异常或取消时已产出未落库的题目（含队列中未消费与 buffer 残余）一并保存；恢复接口改用原子化入队，消除并发恢复创建重复任务引发的唯一约束冲突。失败数据集支持查看已持久化题目：数据集详情接口状态限制放宽为 completed/failed 白名单，前端放开失败数据集的点击查看，下载与发起评估仍仅限生成完成。
 - 优化 Agent 上下文压缩：Yuxi 的 DeepAgents summary adapter 在生成 summary 与写入 conversation history 时，会先对本次模型调用的临时消息视图执行 L1 结构精简，截断旧 `write_file`/`edit_file` 大参数，并把超过阈值的大 `ToolMessage.content` 写入 `outputs/large_tool_results` 后替换为路径和有限预览；L1 不修改 LangGraph state 原始消息，L1 后若上下文低于入口阈值的 40% 则直接调用模型，不生成 summary event，仍超过时才进入 L2 summary。L2 继续使用 DeepAgents `_summarization_event.cutoff_index` 重建 effective messages；Summary 阈值判断改为使用 Yuxi 自己的近似 token 计算结果，不再根据 provider `usage_metadata.total_tokens` 或 usage scaling 提前触发；首次写入 `conversation_history` 前读取旧文件的 sandbox 404 会按 `file_not_found` 处理，不再产生误导性 warning；`present_artifacts` 会拒绝展示 `large_tool_results` 与 `conversation_history` 等工具调用阶段文件。新增管理员可配置项 `summary_keep_messages`、`summary_prompt`、`summary_tool_result_token_limit` 与 `max_execution_steps`，分别控制摘要后保留消息数、摘要提示词、summary 阶段工具结果预览上限和 LangGraph `recursion_limit`。
 - 收敛普通聊天模型加载链路：`select_model` 保留旧 `.call()` 调用契约，内部改为通过 LangChain chat model adapter 复用 Agent 侧模型加载器，统一 OpenAI-compatible、Anthropic 与 Gemini 等 provider 的运行时适配；移除旧 `OpenAIBase` wrapper，默认重试策略迁移为 LangChain provider 参数。
 - 统一 Redis 客户端管理：新增 `yuxi.storage.redis` 作为 Redis 配置、短生命周期同步客户端、共享异步客户端与 ARQ RedisSettings 的唯一基础设施入口；运行队列、系统配置快照同步、模型缓存和 worker 不再各自散落读取 `REDIS_URL` 或直接创建 Redis 客户端，Redis 连接失败日志统一使用脱敏 URL。
-- 新增系统配置 Redis 快照同步：管理员保存配置时仍以 `saves/config/base.toml` 作为唯一持久化来源，成功写入后将可运行时同步的公开配置字段写入 `yuxi:runtime_config`；API 与 worker 进程在启动时各拉起一个后台同步线程，按 5 秒间隔从快照刷新内存值，读取端按普通属性访问、无需感知，Redis 不可用时继续使用当前内存值。`save_dir` 是启动期内部路径配置，不在管理员配置中展示、不从 `base.toml` 读取、不写入 Redis 快照且不支持通过管理员配置接口修改；sandbox 相关配置仍属于启动期敏感配置，运行中的已初始化组件不承诺完整热更新，修改后仍需重启保证生效；移除已无运行时调用点的 `enable_reranker` 与 `default_agent_id` 配置字段。
+- 新增系统配置 Redis 快照同步：管理员配置以 PostgreSQL `config_options` 为唯一持久化来源，成功写入后更新 Redis 缓存版本；API 与 worker 按需读取同一配置，Redis 不可用时回到 PostgreSQL。存储域与 sandbox 配置仍属于启动期环境变量，修改后需重启保证生效；移除无运行时调用点的 `enable_reranker` 与 `default_agent_id` 配置字段。
 - 优化 FastAPI 请求链路并发能力：Milvus 知识库检索中的同步 embedding、向量/BM25/混合检索调用，以及图谱查询中的同步 Milvus/Neo4j 读操作（含连接建立）统一通过有界 `asyncio.to_thread` 在线程中执行，避免阻塞 API 事件循环；并发上限按事件循环懒加载信号量控制，不改变检索默认行为与参数上限。
 - 修复 AgentRun worker 在 LLM 流式响应期间长期占用 PostgreSQL 连接：chat 与 resume 在完成运行时解析、会话和附件等预处理后，进入流式执行前显式提交事务并归还业务连接，最终消息保存时再按需获取连接。
 - 修复异步文档解析阻塞 API 事件循环：DOCX、PPTX、XLS/XLSX、DOC、CSV 与 HTML 的同步转换统一下沉到工作线程，文本读取改用异步文件 I/O；Docling 单例转换增加线程互斥，避免并发解析共享转换器，并补充事件循环可继续调度的回归测试。
@@ -186,7 +290,7 @@
 - 收敛文件服务边界：文件预览判断抽为独立服务，Viewer 文件系统的 workspace 分支复用用户 workspace 服务，线程运行时上下文解析从泛化 `filesystem_service` 拆出为 agent runtime helper。
 - 升级 DeepAgents 到 0.6.7 并适配新版文件系统协议：SubAgentMiddleware 改为显式 subagent spec，Skills prompt 补齐新版占位符；sandbox/skills backend 复用新版 `ReadResult`、`GlobResult`、`GrepResult` 等协议类型，文件权限在 backend 层明确区分 skills、uploads、outputs 与 workspace，保留最小 `CustomCompositeBackend` 以避免非 route glob 误扫其他 route；Agent 上下文压缩改为复用 DeepAgents SummarizationMiddleware，历史摘要与大工具结果统一 offload 到 outputs。
 - 优化聊天输入 @ 文件提及：未创建 Thread 时可搜索用户 workspace，创建 Thread 后按当前对话文件优先、workspace 兜底的来源顺序搜索，并拆分 workspace/thread 缓存避免假 thread 与跨用户缓存污染；输入框与用户消息支持将 raw mention 渲染为带类型图标的引用单元，文件仅显示文件名且保留原始沙盒路径文本。
-- 重构子智能体为 Agent-backed 形态：移除旧 `subagents` 表与 `/api/system/subagents` 管理链路，子智能体改为 `agents.is_subagent=true` 且使用 `SubAgentBackend`，创建/编辑统一走 Agent 管理入口；内置后端收敛为 `ChatbotAgent` 与 `SubAgentBackend`，Context 分为 `BaseContext`、`ChatBotContext` 与 `SubAgentContext`；主 Agent 通过 Yuxi task middleware 启动真实子 Agent graph，子智能体不再嵌套调用子智能体。沙盒挂载同步拆分为 child checkpoint thread、父对话 uploads/outputs、用户级 workspace 与子 Agent skills scope；主线程状态记录 `subagent_runs` 并在前端 task 工具中展示子智能体名称、执行状态、child thread 和产物，task 工具结果会暴露 child thread ID 且支持传回 `thread_id` 继续既有子智能体线程；子智能体执行复用 `agent_runs(run_type=subagent)` 记录父 run、child thread 与状态，child thread state 查询以 `agent_runs` 关系为准，不再解析 thread ID 反推父线程；真实流式 E2E 覆盖子智能体输出文件可由父线程文件/Viewer API 读取。流式链路参考 DeepAgents event streaming，后端将 LangGraph v3 raw event 归一化为 Yuxi semantic stream event，按父/子线程归属隔离 run SSE chunk，并支持通过 child thread state 拉取子智能体中间过程。
+- 重构子智能体为 Agent-backed 形态：移除旧 `subagents` 表与 `/api/system/subagents` 管理链路，子智能体改为 `agents.is_subagent=true` 且使用 `SubAgentBackend`，创建/编辑统一走 Agent 管理入口；内置后端收敛为 `ChatbotAgent` 与 `SubAgentBackend`，Context 分为 `BaseContext`、`ChatBotContext` 与 `SubAgentContext`；主 Agent 通过 Yuxi task middleware 启动真实子 Agent graph，子智能体不再嵌套调用子智能体。沙盒文件装配当前仍拆分为 child checkpoint thread、父对话 uploads/outputs 与用户级 workspace；共享/内置 Skills 文件改为同 uid 授权全集的统一只读投影，个人 Skill 保留在 UserWorkspace，父子各自选择仅控制 Prompt 和工具激活；主线程状态记录 `subagent_runs` 并在前端 task 工具中展示子智能体名称、执行状态、child thread 和产物，task 工具结果会暴露 child thread ID 且支持传回 `thread_id` 继续既有子智能体线程；子智能体执行复用 `agent_runs(run_type=subagent)` 记录父 run、child thread 与状态，child thread state 查询以 `agent_runs` 关系为准，不再解析 thread ID 反推父线程；真实流式 E2E 覆盖子智能体输出文件可由父线程文件/Viewer API 读取。流式链路参考 DeepAgents event streaming，后端将 LangGraph v3 raw event 归一化为 Yuxi semantic stream event，按父/子线程归属隔离 run SSE chunk，并支持通过 child thread state 拉取子智能体中间过程。
 - 修正评估综合得分计算：`overall_score` 改为有答案准确率时取各题准确率平均，否则取各题 `recall@10` 平均，不再把 recall/f1/各 k 检索指标混合平均；历史已存运行不回填。
 - 清理无效鉴权中间件：移除启动时未实际校验令牌的 `AuthMiddleware` 和公开路径残留判断，后端认证边界明确收敛到路由依赖；`/api/auth/me` 改为强制登录并补充未登录访问返回 401 的集成测试。
 
@@ -230,7 +334,7 @@
 - 调整任务中心交互：入口移动到 GitHub 按钮下方，并将右侧抽屉展示改为居中弹窗
 - 将 `yuxi` 从 uv workspace 成员调整为 `backend/package` 下可独立构建的本地 Python 包，backend 通过 path dependency 以已安装包形式发现依赖
 - 新增 Skills 远程安装能力：Skills 管理页支持填写 `owner/repo` 或 GitHub URL，后端通过隔离的临时 `HOME` 调用 `npx skills add` 下载指定 skill
-- 调整部门删除语义：删除部门时不再要求用户数为 0，而是将部门下用户迁移到默认部门
+- 调整部门删除语义：删除部门时将其用户迁移到默认部门，用户数无需预先清零
 - 扩展 viewer 工作区文件操作：`/home/gem/user-data/workspace` 支持从文件系统面板新建文件夹和上传文件
 - 为历史线程补充前端本地配置变更提示：当已有历史消息的对话中切换 Agent、切换配置或编辑配置项时，插入非持久化的信息提示
 - 调整 Worker run 模式下的消息首屏反馈：前端发送消息时先乐观渲染用户消息，再将前端生成的 `request_id` 透传给 `/api/chat/runs` 与服务端 `init` 对账
@@ -286,7 +390,7 @@
 - 调整聊天首页的智能体切换入口：在无历史对话时，智能体数量 `<= 3` 且 `chat-main` 宽度不小于 `380px` 时继续使用横向 segmented；当智能体数量 `>= 4` 或内容区宽度小于 `380px` 时自动收敛为“当前智能体 + 下拉按钮”形式，避免多智能体或窄屏场景下入口被截断
 - 发布前一致性修复：统一 0.6.0 版本号（backend/package/web）、更新 dev/prod 镜像标签语义（`0.6.0.dev` / `0.6.0`），并为 `/api/system/health` 补充 `version` 字段，提升部署可观测性与发版追溯能力
 - 收敛“状态工作台”自动弹出规则：前端不再因为共享 `workspace` 或文件系统天然存在内容而默认展开，改为仅在 `/home/gem/user-data/uploads` 或 `/home/gem/user-data/outputs` 下检测到实际文件时自动弹出；手动打开、关闭、刷新和伸缩交互保持不变
-- 调整智能体 todo 展示语义：待办状态不再作为 `capabilities` 前端开关，而是直接根据运行态 `agent_state.todos` 渲染；同时将 todo 入口从 Agent Panel 移到输入框内的轻量浮层，并让右侧“状态工作台”收敛为文件系统视图，输入框按钮文案同步由“状态”调整为“文件”
+- 调整智能体 todo 展示语义：待办状态直接根据运行态 `agent_state.todos` 渲染，`capabilities` 不再控制该入口；同时将 todo 入口从 Agent Panel 移到输入框内的轻量浮层，并让右侧“状态工作台”收敛为文件系统视图，输入框按钮文案同步由“状态”调整为“文件”
 - 优化 Agent 输入框 mention 行为：在保留附件 mention 的同时，将共享 `workspace` 文件纳入候选范围；并将 `@` 空查询时的候选列表改为空，仅在继续输入后再执行筛选，避免工作区文件过多时直接铺满下拉面板
 - 为前端工作台文件树补齐文件删除能力：`/api/viewer/filesystem/file` 新增删除接口，`AgentPanel` 文件节点新增删除按钮与确认交互，删除后会同步刷新树与预览状态
 - 扩展 Agent Panel 状态工作台删除能力：继续复用 `DELETE /api/viewer/filesystem/file`，在保持接口不变的前提下支持删除文件夹；空目录与非空目录现在都会递归删除，`workspace` 下目录也可直接清理，前端目录节点同步新增删除入口与对应确认文案
@@ -346,8 +450,8 @@
 ## v0.4
 
 ### 新增
-- 新增对于上传附件的智能体中间件，详见[文档](https://xerrors.github.io/Yuxi/advanced/agents-config.html#%E6%96%87%E4%BB%B6%E4%B8%8A%E4%BC%A0%E4%B8%AD%E9%97%B4%E4%BB%B6)
-- 新增多模态模型支持（当前仅支持图片），详见[文档](https://xerrors.github.io/Yuxi/advanced/agents-config.html#%E5%A4%9A%E6%A8%A1%E6%80%81%E5%9B%BE%E7%89%87%E6%94%AF%E6%8C%81)
+- 新增对于上传附件的智能体中间件，详见[智能体配置文档](https://xerrors.github.io/Yuxi/agents/agents-config)
+- 新增多模态模型支持（当前仅支持图片），详见[智能体配置文档](https://xerrors.github.io/Yuxi/agents/agents-config)
 - 新建 DeepAgents 智能体（深度分析智能体），支持 todo，files 等渲染，支持文件的下载。
 - 新增基于知识库文件生成思维导图功能（[#335](https://github.com/xerrors/Yuxi/pull/335#issuecomment-3530976425)）
 - 新增基于知识库文件生成示例问题功能（[#335](https://github.com/xerrors/Yuxi/pull/335#issuecomment-3530976425)）
@@ -355,10 +459,10 @@
 - 新增自定义模型支持、新增 dashscope rerank/embeddings 模型的支持
 - 新增文档解析的图片支持，已支持 MinerU Officical、Docs、Markdown Zip格式
 - 新增暗色模式支持并调整整体 UI（[#343](https://github.com/xerrors/Yuxi/pull/343)）
-- 新增知识库评估功能，支持导入评估基准或者自动构建评估基准（目前仅支持Milvus类型知识库）详见[文档](https://xerrors.github.io/Yuxi/intro/evaluation.html)
+- 新增知识库评估功能，支持导入评估基准或者自动构建评估基准（目前仅支持Milvus类型知识库）详见[知识库评估文档](https://xerrors.github.io/Yuxi/intro/evaluation)
 - 新增同名文件处理逻辑：遇到同名文件则在上传区域提示，是否删除旧文件
 - 新增生产环境部署脚本，固定 python 依赖版本，提升部署稳定性
-- 优化图谱可视化方式，统一图谱数据结构，统一使用基于 G6 的可视化方式，同时支持上传带属性的图谱文件，详见[文档](https://xerrors.github.io/Yuxi/intro/knowledge-base.html#_1-%E4%BB%A5%E4%B8%89%E5%85%83%E7%BB%84%E5%BD%A2%E5%BC%8F%E5%AF%BC%E5%85%A5)
+- 优化图谱可视化方式，统一图谱数据结构，统一使用基于 G6 的可视化方式，同时支持上传带属性的图谱文件，详见[知识库文档](https://xerrors.github.io/Yuxi/intro/knowledge-base)
 - 优化 DBManager / ConversationManager，支持异步操作
 - 优化 知识库详情页面，更加简洁清晰，增强文件下载功能
 

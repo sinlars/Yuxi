@@ -17,6 +17,14 @@ export const healthApi = {
   checkHealth: () => apiGet('/api/system/health', {}, false)
 }
 
+export const discoveryApi = {
+  /**
+   * 获取当前 API 进程实际提供的运行时能力。
+   * @returns {Promise<Object>} - 服务端能力发现结果
+   */
+  getCapabilities: () => apiGet('/api/system/discovery', {}, false)
+}
+
 // =============================================================================
 // === 配置管理分组 ===
 // =============================================================================
@@ -56,6 +64,13 @@ export const configApi = {
   }
 }
 
+export const configOptionsApi = {
+  getOptions: async () => apiAdminGet('/api/system/config/options'),
+
+  updateOption: async (key, value) =>
+    apiAdminPut(`/api/system/config/options/${encodeURIComponent(key)}`, { value })
+}
+
 // =============================================================================
 // === 信息管理分组 ===
 // =============================================================================
@@ -73,11 +88,8 @@ export const brandApi = {
 // =============================================================================
 
 export const ocrApi = {
-  /**
-   * 获取OCR服务健康状态
-   * @returns {Promise} - OCR健康状态
-   */
-  getHealth: async () => apiAdminGet('/api/system/ocr/health')
+  getOptions: async () => apiGet('/api/system/ocr/options'),
+  getHealth: async () => apiGet('/api/system/ocr/health')
 }
 
 // =============================================================================

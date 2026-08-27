@@ -1,32 +1,3 @@
-import { extractCitationSources } from './sourceCitations.js'
-
-const CITATION_MANIFEST_PATTERN =
-  /<yuxi-citation-manifest-v1>([\s\S]*?)<\/yuxi-citation-manifest-v1>/
-
-const parseJsonContent = (content) => {
-  if (Array.isArray(content)) return content
-  if (content && typeof content === 'object') return content
-  if (typeof content !== 'string') return null
-  try {
-    return JSON.parse(content)
-  } catch {
-    return null
-  }
-}
-
-const parseCitationManifest = (content) => {
-  // 引用清单由后端在大型结果落盘前生成，刷新后无需解析沙箱文件或截断 JSON。
-  if (typeof content !== 'string') return null
-  const match = content.match(CITATION_MANIFEST_PATTERN)
-  if (!match) return null
-  try {
-    const manifest = JSON.parse(match[1])
-    return manifest?.version === 1 ? manifest : null
-  } catch {
-    return null
-  }
-}
-
 /**
  * 消息处理工具类
  */
@@ -127,6 +98,45 @@ export class MessageProcessor {
   }
 
   /**
+   * 提取一轮对话中已成功登记的交付物路径。
+   * @param {Object} conv - 单轮对话
+   * @returns {Array<string>} 去重后的交付物路径
+   */
+  static extractArtifactsFromConversation(conv) {
+    if (!conv || !Array.isArray(conv.messages)) return []
+
+    const artifacts = []
+    const seenPaths = new Set()
+    for (const message of conv.messages) {
+      if (message?.type !== 'ai' || !Array.isArray(message.tool_calls)) continue
+
+      for (const toolCall of message.tool_calls) {
+        const toolName = toolCall?.name || toolCall?.function?.name
+        if (toolName !== 'present_artifacts') continue
+        if (!toolCall.tool_call_result && toolCall.status !== 'success') continue
+
+        let args = toolCall.args ?? toolCall.function?.arguments
+        if (typeof args === 'string') {
+          try {
+            args = JSON.parse(args)
+          } catch {
+            continue
+          }
+        }
+
+        const filepaths = Array.isArray(args?.filepaths) ? args.filepaths : []
+        for (const filepath of filepaths) {
+          const normalizedPath = typeof filepath === 'string' ? filepath.trim() : ''
+          if (!normalizedPath || seenPaths.has(normalizedPath)) continue
+          seenPaths.add(normalizedPath)
+          artifacts.push(normalizedPath)
+        }
+      }
+    }
+    return artifacts
+  }
+
+  /**
    * 提取一轮对话中所有知识库检索块
    * @param {Object} conv - 单轮对话
    * @param {Array} databases - 知识库列表
@@ -135,126 +145,76 @@ export class MessageProcessor {
   static extractKnowledgeChunksFromConversation(conv, databases = []) {
     if (!conv || !Array.isArray(conv.messages) || conv.messages.length === 0) return []
 
-    const databaseById = new Map(
-      (databases || [])
-        .filter((db) => db && (db.kb_id || db.id))
-        .map((db) => [String(db.kb_id || db.id), db])
-    )
     const databaseNames = new Set(
       (databases || [])
         .map((db) => db?.name)
         .filter((name) => typeof name === 'string' && name.trim())
     )
+    if (databaseNames.size === 0) return []
+
     const normalizedChunks = []
     const dedupSet = new Set()
 
-    const appendChunk = (
-      chunk,
-      { kbId = '', kbName = '', fileId = '', toolName = '' } = {}
-    ) => {
+    const appendChunk = (chunk, kbName) => {
       if (!chunk || typeof chunk !== 'object') return
       const content = typeof chunk.content === 'string' ? chunk.content.trim() : ''
       if (!content) return
 
       const metadata = chunk.metadata && typeof chunk.metadata === 'object' ? chunk.metadata : {}
-      const resolvedKbId = String(chunk.kb_id || kbId || '')
-      const resolvedKb = databaseById.get(resolvedKbId)
-      const resolvedKbName = resolvedKb?.name || kbName || resolvedKbId || '知识库'
-      const resolvedFileId = String(chunk.file_id || metadata.file_id || fileId || '')
-      const citationSource = String(chunk.citation_source || metadata.citation_source || '')
-      const chunkId = String(chunk.id || metadata.chunk_id || '')
-      const dedupKey = citationSource || `${resolvedKbId}::${chunkId || content}`
+      const dedupKey =
+        metadata.chunk_id && typeof metadata.chunk_id === 'string'
+          ? `${kbName}::${metadata.chunk_id}`
+          : `${kbName}::${content}`
       if (dedupSet.has(dedupKey)) return
       dedupSet.add(dedupKey)
 
-      const score =
-        typeof chunk.score === 'number'
-          ? chunk.score
-          : typeof metadata.score === 'number'
-            ? metadata.score
-            : null
-      const source =
-        metadata.source ||
-        metadata.file_name ||
-        metadata.filename ||
-        chunk.file_name ||
-        (resolvedFileId ? `${resolvedKbName} / ${resolvedFileId}` : resolvedKbName)
+      const score = typeof chunk.score === 'number' ? chunk.score : null
       normalizedChunks.push({
-        kb_id: resolvedKbId,
-        kb_name: resolvedKbName,
-        file_id: resolvedFileId,
-        citation_source: citationSource,
-        source_type: toolName === 'open_kb_document' ? 'document_window' : 'retrieval_chunk',
+        kb_name: kbName,
         content,
         score,
         metadata: {
-          ...metadata,
-          source,
-          file_id: resolvedFileId,
-          chunk_id: chunkId,
-          chunk_index: metadata.chunk_index,
-          start_line: chunk.start_line || metadata.start_line,
-          end_line: chunk.end_line || metadata.end_line
+          source: metadata.source || '',
+          file_id: metadata.file_id || '',
+          chunk_id: metadata.chunk_id || '',
+          chunk_index: metadata.chunk_index
         }
       })
     }
 
-    const appendStructuredKnowledgeOutput = (parsed, toolName) => {
-      if (!parsed || typeof parsed !== 'object') return false
-
-      if (Array.isArray(parsed.results)) {
-        for (const chunk of parsed.results) appendChunk(chunk, { kbId: parsed.kb_id, toolName })
-        return true
-      }
-      if (Array.isArray(parsed.windows)) {
-        for (const window of parsed.windows) {
-          appendChunk(window, { kbId: parsed.kb_id, fileId: parsed.file_id, toolName })
+    const parseToolResultContent = (content) => {
+      if (Array.isArray(content)) return content
+      if (content && typeof content === 'object') return content
+      if (typeof content === 'string') {
+        try {
+          return JSON.parse(content)
+        } catch {
+          return null
         }
-        return true
       }
-      if (typeof parsed.content === 'string' && parsed.citation_source) {
-        appendChunk(parsed, { kbId: parsed.kb_id, fileId: parsed.file_id, toolName })
-        return true
-      }
-      return false
+      return null
     }
 
     for (const msg of conv.messages) {
       if (!msg || msg.type !== 'ai' || !Array.isArray(msg.tool_calls)) continue
 
       for (const toolCall of msg.tool_calls) {
-        const toolName = toolCall?.name || toolCall?.function?.name || ''
+        const kbName = toolCall?.name || toolCall?.function?.name
+        if (!databaseNames.has(kbName)) continue
 
         const content = toolCall?.tool_call_result?.content
-        const manifest = parseCitationManifest(content)
-        for (const chunk of manifest?.knowledge_chunks || []) appendChunk(chunk, { toolName })
-
-        const parsed = parseJsonContent(content)
+        const parsed = parseToolResultContent(content)
         if (!parsed) continue
 
-        if (toolName === 'query_kb' && appendStructuredKnowledgeOutput(parsed, toolName)) {
-          continue
-        }
-
-        if (toolName === 'find_kb_document' && appendStructuredKnowledgeOutput(parsed, toolName)) {
-          continue
-        }
-
-        if (toolName === 'open_kb_document' && appendStructuredKnowledgeOutput(parsed, toolName)) {
-          continue
-        }
-
-        if (!databaseNames.has(toolName)) continue
-
-        // 兼容旧知识库工具：工具名为知识库名称，结果直接返回 chunks。
+        // Milvus / Dify: 直接是 chunks 数组
         if (Array.isArray(parsed)) {
-          for (const chunk of parsed) appendChunk(chunk, { kbName: toolName })
+          for (const chunk of parsed) appendChunk(chunk, kbName)
           continue
         }
 
         const wrappedChunks = parsed?.data?.chunks
         if (Array.isArray(wrappedChunks)) {
-          for (const chunk of wrappedChunks) appendChunk(chunk, { kbName: toolName })
+          for (const chunk of wrappedChunks) appendChunk(chunk, kbName)
         }
       }
     }
@@ -279,21 +239,34 @@ export class MessageProcessor {
     const webSources = []
     const dedupSet = new Set()
 
+    const parseToolResultContent = (content) => {
+      if (Array.isArray(content)) return content
+      if (content && typeof content === 'object') return content
+      if (typeof content === 'string') {
+        try {
+          return JSON.parse(content)
+        } catch {
+          return null
+        }
+      }
+      return null
+    }
+
     for (const msg of conv.messages) {
       if (!msg || msg.type !== 'ai' || !Array.isArray(msg.tool_calls)) continue
 
       for (const toolCall of msg.tool_calls) {
         const toolName = (toolCall?.name || toolCall?.function?.name || '').toLowerCase()
-        if (!toolName.includes('tavily_search')) continue
+        if (
+          !toolName.includes('web_search') &&
+          !toolName.includes('tavily_search') &&
+          !toolName.includes('doubao_search')
+        )
+          continue
 
         const content = toolCall?.tool_call_result?.content
-        const manifest = parseCitationManifest(content)
-        const parsed = parseJsonContent(content)
-        const results = Array.isArray(parsed?.results)
-          ? parsed.results
-          : Array.isArray(manifest?.web_sources)
-            ? manifest.web_sources
-            : []
+        const parsed = parseToolResultContent(content)
+        const results = Array.isArray(parsed?.results) ? parsed.results : []
         if (results.length === 0) continue
 
         for (const item of results) {
@@ -307,7 +280,6 @@ export class MessageProcessor {
             tool_name: toolCall?.name || toolCall?.function?.name || '网络搜索',
             title,
             url,
-            citation_source: url,
             score: typeof item?.score === 'number' ? item.score : null,
             content: typeof item?.content === 'string' ? item.content : '',
             published_date: typeof item?.published_date === 'string' ? item.published_date : ''
@@ -336,20 +308,10 @@ export class MessageProcessor {
 
     // 复用提取逻辑，通过构建临时对话对象
     const mockConv = { messages: [message] }
-    const citedSources = extractCitationSources(message.content)
-    const citedSourceSet = new Set(citedSources)
-    return MessageProcessor.assignCitationIndexes({
-      knowledgeChunks: MessageProcessor.extractKnowledgeChunksFromConversation(
-        mockConv,
-        databases
-      ).filter(
-        (source) =>
-          source.source_type !== 'document_window' ||
-          citedSourceSet.has(source.citation_source)
-      ),
-      webSources: MessageProcessor.extractWebSourcesFromConversation(mockConv),
-      citedSources
-    })
+    return {
+      knowledgeChunks: MessageProcessor.extractKnowledgeChunksFromConversation(mockConv, databases),
+      webSources: MessageProcessor.extractWebSourcesFromConversation(mockConv)
+    }
   }
 
   /**
@@ -358,76 +320,10 @@ export class MessageProcessor {
    * @param {Array} databases - 知识库列表
    * @returns {{knowledgeChunks: Array, webSources: Array}}
    */
-  static extractSourcesFromConversation(conv, databases = [], previousConversations = []) {
-    const citedSources = []
-    for (const message of conv?.messages || []) {
-      if (message?.type === 'ai') citedSources.push(...extractCitationSources(message.content))
-    }
-
-    const citedSourceSet = new Set(citedSources)
-    const knowledgeChunks = MessageProcessor.extractKnowledgeChunksFromConversation(
-      conv,
-      databases
-    ).filter(
-      (source) =>
-        source.source_type !== 'document_window' || citedSourceSet.has(source.citation_source)
-    )
-    const webSources = MessageProcessor.extractWebSourcesFromConversation(conv)
-    const knownKnowledgeSources = new Set(
-      knowledgeChunks.map((source) => source.citation_source).filter(Boolean)
-    )
-    const knownWebSources = new Set(webSources.map((source) => source.citation_source).filter(Boolean))
-
-    // 后续追问可能直接沿用前一轮已经核验过的引用标识。仅补回本轮正文实际引用的
-    // 历史来源，避免把整段会话中的所有检索候选都混入当前来源面板。
-    for (const previousConv of previousConversations || []) {
-      for (const source of MessageProcessor.extractKnowledgeChunksFromConversation(
-        previousConv,
-        databases
-      )) {
-        if (
-          citedSourceSet.has(source.citation_source) &&
-          !knownKnowledgeSources.has(source.citation_source)
-        ) {
-          knowledgeChunks.push(source)
-          knownKnowledgeSources.add(source.citation_source)
-        }
-      }
-      for (const source of MessageProcessor.extractWebSourcesFromConversation(previousConv)) {
-        if (citedSourceSet.has(source.citation_source) && !knownWebSources.has(source.citation_source)) {
-          webSources.push(source)
-          knownWebSources.add(source.citation_source)
-        }
-      }
-    }
-
-    return MessageProcessor.assignCitationIndexes({
-      knowledgeChunks,
-      webSources,
-      citedSources
-    })
-  }
-
-  static assignCitationIndexes({ knowledgeChunks = [], webSources = [], citedSources = [] } = {}) {
-    const availableSources = new Set(
-      [...knowledgeChunks, ...webSources]
-        .map((source) => String(source?.citation_source || ''))
-        .filter(Boolean)
-    )
-    const indexBySource = new Map()
-    for (const citationSource of citedSources) {
-      if (!availableSources.has(citationSource) || indexBySource.has(citationSource)) continue
-      indexBySource.set(citationSource, indexBySource.size + 1)
-    }
-    const assign = (source) => {
-      const citationSource = String(source?.citation_source || '')
-      if (!citationSource) return { ...source, citation_index: null }
-      return { ...source, citation_index: indexBySource.get(citationSource) || null }
-    }
-
+  static extractSourcesFromConversation(conv, databases = []) {
     return {
-      knowledgeChunks: knowledgeChunks.map(assign),
-      webSources: webSources.map(assign)
+      knowledgeChunks: MessageProcessor.extractKnowledgeChunksFromConversation(conv, databases),
+      webSources: MessageProcessor.extractWebSourcesFromConversation(conv)
     }
   }
 

@@ -30,6 +30,9 @@ class FakeEvaluationRepository:
         self.dataset_updates: list[tuple[str, dict]] = []
         self.run_updates: list[tuple[str, dict]] = []
 
+    async def count_dataset_items(self, dataset_id: str) -> int:
+        return 0
+
     async def update_dataset(self, dataset_id: str, data: dict) -> None:
         await asyncio.sleep(0)
         self.dataset_updates.append((dataset_id, deepcopy(data)))
@@ -62,11 +65,11 @@ async def test_dataset_cancellation_updates_build_status(monkeypatch):
 
     loading = asyncio.Event()
 
-    async def cancelled_get_kb(kb_id: str):
+    async def cancelled_get_config(kb_id: str):
         loading.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(evaluation_module.knowledge_base, "aget_kb", cancelled_get_kb)
+    monkeypatch.setattr(evaluation_module.kb_manager, "get_kb_config", cancelled_get_config)
 
     task = asyncio.create_task(service._generate_dataset_task(context))
     await asyncio.wait_for(loading.wait(), timeout=1)

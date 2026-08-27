@@ -1,179 +1,209 @@
 # 参与贡献
 
-感谢你对 Yuxi 的兴趣。我们欢迎 Issue、文档改进、Bug 修复、测试补充以及新功能贡献。
+欢迎提交 Bug 修复、功能改进、测试和文档。本文是 Fork → 开发 → 验证 → PR 的完整流程；只想了解仓库入口时，可以先看根目录的 [CONTRIBUTING.md](https://github.com/xerrors/Yuxi/blob/main/CONTRIBUTING.md)。
 
-如果你只是想快速了解仓库入口信息，可以先看根目录的 [CONTRIBUTING.md](../../CONTRIBUTING.md)。
+## 开始前
 
-<a href="https://github.com/xerrors/Yuxi/contributors">
-    <img src="https://contributors.nn.ci/api?repo=xerrors/Yuxi" alt="贡献者名单">
-</a>
+- 先搜索 [Issues](https://github.com/xerrors/Yuxi/issues)，确认问题没有重复。
+- 如果任务来自 GitHub Project，读完任务描述、关联 Issue、验收标准和讨论，并确认任务已经分配给你。
+- 需求会改变架构、权限、持久化、运行生命周期、公开接口或模型可见输入时，先在 Issue 或 [Discussions](https://github.com/xerrors/Yuxi/discussions) 对齐方案，并建立 [工程决策记录](./decisions/README.md)。
+- 一个 PR 解决一个清楚的问题。无关的格式化、重构和“顺手优化”请另开 PR。
 
-## 开始之前
+修改不熟悉的模块前，先读 [ARCHITECTURE.md](https://github.com/xerrors/Yuxi/blob/main/ARCHITECTURE.md)，再从真实的路由、service、repository、Schema、Compose 和测试中定位实现。源码和可执行测试比旧文档、历史 PR 或自动生成 Wiki 更可靠。
 
-提交前建议先完成以下检查：
+## 1. Fork、同步和建分支
 
-- 搜索已有 [Issues](https://github.com/xerrors/Yuxi/issues)
-- 对较大的功能改动，先发 Issue 讨论设计和边界
-- 保持一次 PR 只解决一个明确问题，避免把无关重构混在一起
+```bash
+git clone https://github.com/<your-username>/Yuxi.git
+cd Yuxi
+git remote add upstream https://github.com/xerrors/Yuxi.git
+git fetch upstream
+git switch main
+git merge --ff-only upstream/main
+git push origin main
+git switch -c docs/improve-guides
+```
 
-## 开发原则
+`origin` 指向你的 Fork，`upstream` 指向 `xerrors/Yuxi`。不要把开发分支直接推送到 `upstream`，也不要在 `main` 上开发。
 
-本项目默认遵循以下开发原则：
+如果开发期间 `main` 有更新，只有在出现冲突、CI 明确要求更新，或维护者要求时才同步 `upstream/main`。涉及 rebase 和强制推送时使用 `--force-with-lease`，并先确认该分支没有其他贡献者共同开发。
 
-- 避免过度设计，只做当前需求直接需要的改动
-- 不额外添加“顺手优化”、兼容层或未来需求抽象
-- 尽量复用现有实现，保持代码简单、聚焦、可维护
-- 只在系统边界做必要校验，不为不可能发生的内部场景增加复杂度
+分支名可以使用：
 
-## 开发环境
+```text
+feat/<topic>      新功能
+fix/<topic>       Bug 修复
+docs/<topic>      文档更新
+refactor/<topic>  重构
+test/<topic>      测试改进
+chore/<topic>     工程辅助
+```
 
-Yuxi 基于 Docker Compose 管理开发环境。开发、调试、测试都应尽量在运行中的容器中完成。
+## 2. 开发环境
 
-### 启动项目
+Yuxi 的开发拓扑以 Docker Compose 为准。首次启动前，根据 `.env.template` 准备 `.env`，再运行：
 
 ```bash
 docker compose up -d
+docker compose ps
+docker compose logs --tail=100 api
 ```
 
-### 常用检查命令
+`api` 和 `web` 服务默认支持热重载；容器名分别是 `api-dev` 和 `web-dev`。修改本地代码后通常不需要手动重启。
+
+只改聊天、工作区或 Skills 而不需要知识库时，可以使用：
 
 ```bash
-docker ps
-docker logs api-dev --tail 100
+make up-lite
 ```
 
-`api-dev` 和 `web-dev` 默认支持热重载。通常情况下，本地修改代码后不需要重启容器。
+LITE 模式不会注册知识库、图谱和评估能力。需要完整链路时先 `make down`，再使用完整 Compose 启动。
 
-如需进一步了解服务定义，可查看 [docker-compose.yml](../../docker-compose.yml)。
+## 3. 实现原则
 
-## 贡献流程
+- 用满足验收标准的最小实现，保持主路径线性可读。
+- HTTP 路由只做请求解析、认证上下文和响应装配；用例流程放在 `yuxi.services`，持久化查询放在 `yuxi.repositories`。
+- 预设条件不成立时明确失败，不用静默回退或吞异常掩盖问题。
+- 权限在后端依赖和 repository 可见性查询处执行；前端守卫、prompt、schema omission 和隐藏按钮不是授权边界。
+- PostgreSQL 保存业务事实；Redis 只负责投递、短期事件、取消和缓存。LangGraph checkpoint 只使用 PostgreSQL。
+- 文件路径、沙盒虚拟路径、对象 URL 和宿主机路径不能混用；在真正产生副作用的 executor 或 repository 处做边界校验。
+- 修复 Bug 时先补一个能稳定复现原问题的回归测试，再改实现。
+- 新增函数或类使用简洁中文 docstring；注释只说明时序、Owner、安全边界和调用义务。
 
-### 1. Fork 仓库
+### 后端
 
-在 GitHub 上 Fork 本仓库到你的个人账户。
+后端代码位于 `backend/`。新增测试放在 `backend/test/unit`、`backend/test/integration` 或 `backend/test/e2e`，按测试实际依赖选择层级。测试分层、fixture 和 skip 规则见[测试规范](./testing-guidelines.md)。
 
-### 2. 创建分支
+### 前端
 
-请使用语义明确的分支名，例如：
+前端代码位于 `web/`，使用 `pnpm` 和 LESS：
+
+- API 封装放在 `web/src/apis`；
+- 图标优先使用 `@lucide/vue`；
+- 颜色优先使用 `base.css` 和 `base.dark.css` 的变量；
+- 浅色、暗色、loading、empty、error、focus 和响应式状态都要检查；
+- UI 改动遵循[产品体验与界面设计规范](./design.md)。
+
+不要为单次需求引入新的依赖、样式体系或抽象。确需新增依赖时，在 PR 中说明用途、替代方案和许可证影响。
+
+## 4. 检查和测试
+
+先跑与改动最相关的最小集合，再根据风险扩大：
+
+| 改动 | 最低验证 |
+| --- | --- |
+| 纯 Python/JavaScript 逻辑 | 相关 unit，断言业务结果 |
+| API、权限或持久化 | 真实 HTTP integration |
+| Run、FIFO、SSE、沙盒、恢复或文件 | E2E，核对最终状态和产物 |
+| 前端交互 | lint、unit；重要行为再 build 和真实页面检查 |
+| 文档、导航或链接 | 相对链接检查、文档构建和 `git diff --check` |
+
+后端常用命令：
 
 ```bash
-git checkout -b feature/amazing-feature
-git checkout -b fix/chat-stream-interrupt
-git checkout -b docs/update-contributing-guide
+docker compose exec api uv run --group test pytest test/unit -m "not slow"
+docker compose exec api uv run --group test pytest test/integration
+docker compose exec api uv run --group test pytest test/e2e -m e2e
 ```
 
-### 3. 开发与验证
-
-按项目规范完成代码、测试与文档更新。开发完成后，至少完成：
-
-- 检查
-- 测试
-- Lint
-- 必要的端到端验证
-
-如果现有测试脚本不足以覆盖你的改动，应补充对应测试，测试脚本优先放在 `backend/test`。
-
-### 4. 提交代码
+前端常用命令：
 
 ```bash
-git commit -m "feat: add knowledge graph import flow"
+docker compose exec web pnpm run lint:check
+docker compose exec web pnpm run test:unit
+docker compose exec web pnpm run build
 ```
 
-### 5. 推送并发起 Pull Request
-
-```bash
-git push origin feature/amazing-feature
-```
-
-创建 PR 时，请写清楚：
-
-- 修改内容
-- 修改原因
-- 影响范围
-- 验证方式
-
-如果涉及 UI 改动，建议附上截图或录屏。
-
-## 前端贡献规范
-
-前端目录位于 `web/`，提交前请遵循以下约束：
-
-- 包管理器使用 `pnpm`
-- 所有 API 接口定义统一放在 `web/src/apis`
-- Icon 优先使用 `lucide-vue-next`
-- 样式使用 `less`
-- 非特殊情况必须优先复用 [web/src/assets/css/base.css](../../web/src/assets/css/base.css) 中的颜色变量
-
-界面设计和样式约束可参考 [design.md](./design.md)。
-
-## 后端贡献规范
-
-后端目录位于 `backend/`，提交时请注意：
-
-- Python 风格尽量保持 pythonic
-- 优先使用较新的语法，兼容目标为 Python 3.12+
-- 优先在容器内运行调试和测试命令
-
-示例：
-
-```bash
-docker compose exec api uv run python test/your_script.py
-```
-
-测试脚本建议放在 `backend/test` 下。
-
-## 质量检查
-
-提交前请至少完成以下检查：
-
-### 格式化与静态检查
+项目统一格式化命令会修改工作树，完成格式化后应重新查看 diff：
 
 ```bash
 make format
-make lint
 ```
 
-如果测试依赖管理员账户，可从项目根目录的 `.env` 中读取相关配置。
+提交前至少运行仓库信任检查、其单元测试和后端 unit：
 
-## 文档维护要求
-
-代码改动后，请同步检查是否需要更新文档。
-
-- 通用开发文档位于 `docs/`
-- 文档导航定义在 `docs/.vitepress/config.mts`
-- 未完成规划、未来里程碑或已知问题更新 [roadmap.md](./roadmap.md)；已完成的用户可见变更或发布说明更新 [changelog.md](./changelog.md)
-- 若确需新增仅开发者可见的说明文档，放在 `docs/vibe/`
-
-## 提交信息规范
-
-推荐使用清晰、可检索的提交前缀：
-
-```text
-feat: 添加新功能
-fix: 修复 bug
-docs: 更新文档
-refactor: 代码重构
-test: 添加测试
-chore: 构建过程或辅助工具的变动
+```bash
+python3 scripts/verify_engineering_contracts.py
+python3 -m unittest scripts.test_verify_engineering_contracts
+docker compose exec api uv run --group test pytest test/unit -m "not slow"
+git diff --check
 ```
 
-## 智能体
+如果环境、凭证或外部服务导致某项检查无法执行，在 PR 中写明命令、原因、未验证范围和剩余风险。没有默认数据不是跳过测试的理由，应由 fixture 创建资源。测试“通过”也不能替代对数据库、文件、对象、DOM 或协议结果的回读。
 
-如果是 Agent 提交的 PR（如 Claude Code、Codex 等），请在 PR 标题最后添加 🤖 标志。
+## 5. 提交前 Review
 
-并在 PR 正文中添加
+代码变更在 commit 前必须经过一个不继承当前开发上下文的独立 Reviewer。Reviewer 应读取完整需求、规范、完整 diff、相关源码、测试结果和未验证范围，重点检查：
 
+1. 主路径、边界、错误处理和回归测试是否完整；
+2. 路由、服务、仓储、前端 API 和测试是否位于正确边界；
+3. 是否引入不必要的抽象、fallback、配置或维护表面；
+4. 权限、文件隔离、事务、Run ownership 和外部副作用是否闭合；
+5. 文档是否写对当前行为，oracle 是否独立，负向案例是否能让目标缺陷变红。
+
+发现影响功能、边界、证据可信度或认知负担的问题，先修正再提交。独立 Review 不能替代真实测试和最终事实回读。
+
+## 6. Commit 和 Pull Request
+
+提交信息使用中文 Conventional Commit：
+
+```bash
+git add <changed-files>
+git commit -m "docs: 完善部署与快速开始文档"
+git push -u origin docs/improve-guides
 ```
-<details>
-<summary>贡献说明</summary>
 
-本 PR 由 [Agent Name] 自动生成，且没有人工干预。
-</details>
+常用类型是 `feat`、`fix`、`docs`、`refactor`、`test` 和 `chore`。提交前检查：
+
+```bash
+git status
+git diff --check
+git diff
 ```
 
-## 反馈渠道
+PR 标题直接说明目标，正文说明背景、影响范围、验证命令和未验证风险。非平凡变更还要列出受影响主张、事实 Owner、决策记录、oracle、负向案例和观察边界；不要创建中央 claim ID 清单。
 
-- Bug 反馈：<https://github.com/xerrors/Yuxi/issues>
-- 功能讨论：<https://github.com/xerrors/Yuxi/discussions>
+- **Bug 修复**：说明触发步骤、错误表现、根因、回归测试、数据影响和未覆盖边界。
+- **新功能**：说明用户场景、目标、非目标、设计取舍、接口/配置/迁移影响和测试结果。
+- **UI 改动**：附真实页面截图或录屏，覆盖关键状态和适用的浅色、暗色、响应式场景；没有截图就写明未完成视觉验证。
 
-感谢每一位贡献者的投入。
+Agent 创建 PR 前，先把拟提交的标题和完整正文展示给用户，得到明确确认后再创建。确认不代表跳过测试、敏感信息检查或 CI。
+
+PR 正文按创建方式选择模板：
+
+- Agent 创建的 PR 使用默认的 [Agent PR 模板](https://github.com/xerrors/Yuxi/blob/main/.github/PULL_REQUEST_TEMPLATE.md)；
+- 人工或其他非 Agent 方式创建的 PR 可使用[简化模板](https://github.com/xerrors/Yuxi/blob/main/.github/PULL_REQUEST_TEMPLATE/non-agent.md)。使用 GitHub compare 页面时增加 `template=non-agent.md` 查询参数，使用 GitHub CLI 时传入 `--template .github/PULL_REQUEST_TEMPLATE/non-agent.md`。
+
+模板复杂度不同，不改变非平凡或高风险变更的工程证据要求。来自 Fork 的 PR 默认无法读取主仓库 Secrets；不要通过修改工作流、打印环境变量或扩大权限绕过这一限制。如果验证必须依赖受保护凭证，应在 PR 中说明并由维护者执行对应检查。
+
+## 7. 文档维护
+
+代码、配置、API、状态、权限或命令变化时，同一 PR 更新对应的 owning page：
+
+- `intro/` 保持完成用户任务的顺序；
+- `advanced/` 保持配置、部署和外部集成参考；
+- `agents/` 保持 Agent 扩展和操作方法；
+- `mechanisms/` 保持运行链路、状态、权限和失败语义；
+- 已发布变更写入 [changelog](./changelog.md)，未完成方向写入 [roadmap](./roadmap.md)，不要同时把同一事项写成完成和计划；
+- 新增页面或移动页面时同步更新 `.vitepress/config.mts` 和全部入站链接。
+
+文档使用直接、自然的现在时，写明执行者、条件、结果和失败后果。教程要有可观察验收，参考要有默认值和生效时机，机制页要链接源码和验证入口。完整规则见[文档编写与维护规范](./documentation-guidelines.md)。
+
+文档变更至少运行：
+
+```bash
+python3 scripts/verify_engineering_contracts.py
+python3 -m unittest scripts.test_verify_engineering_contracts
+cd docs && pnpm run build
+git diff --check
+```
+
+## AI 辅助开发
+
+AI 可以帮助搜索、实现、测试和整理文档，但贡献者仍对最终代码、文档、安全性和验证结果负责。不要向不受信任的服务提供 `.env`、仓库 Secret、Token、用户数据或内部地址；AI 辅助贡献和人工贡献使用相同的 Review、测试和 PR 要求。
+
+## 获取帮助
+
+- Bug 和功能讨论：[GitHub Issues](https://github.com/xerrors/Yuxi/issues)
+- 方案讨论：[GitHub Discussions](https://github.com/xerrors/Yuxi/discussions)
+- 贡献入口：[根目录 CONTRIBUTING.md](https://github.com/xerrors/Yuxi/blob/main/CONTRIBUTING.md)

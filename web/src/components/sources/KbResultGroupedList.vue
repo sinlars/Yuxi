@@ -1,70 +1,30 @@
 <template>
-  <div ref="listRef" class="kb-result-grouped-list">
+  <div class="kb-result-grouped-list">
     <div v-if="showSummary" class="result-summary">
-      找到 {{ normalizedChunks.length }} 个知识库来源，来自 {{ fileGroupList.length }} 个文件
+      找到 {{ normalizedChunks.length }} 个相关文档片段，来自 {{ fileGroupList.length }} 个文件
     </div>
 
     <div class="kb-results" v-if="normalizedChunks.length > 0">
-      <div v-for="fileGroup in fileGroupList" :key="fileGroup.filename" class="file-group">
-        <div
-          class="file-header"
-          :class="{ expanded: expandedFiles.has(fileGroup.filename) }"
-          @click="toggleFile(fileGroup.filename)"
+      <div v-for="fileGroup in fileGroupList" :key="fileGroup.key" class="file-group-item">
+        <button
+          class="file-info"
+          :aria-label="`查看 ${fileGroup.filename} 的检索片段`"
+          @click="openFileChunksModal(fileGroup)"
         >
-          <div class="file-info">
-            <ChevronRight
-              v-if="!expandedFiles.has(fileGroup.filename)"
-              :size="14"
-              class="expand-icon"
-            />
-            <ChevronDown v-else :size="14" class="expand-icon" />
-            <FileText :size="14" color="var(--gray-600)" />
-            <span class="file-name">{{ fileGroup.filename }}</span>
-            <span class="chunk-count">{{ fileGroup.chunks.length }} 项</span>
-          </div>
+          <FileText :size="15" class="file-icon" />
+          <span class="file-name" :title="fileGroup.filename">{{ fileGroup.filename }}</span>
+          <span class="chunk-count">{{ fileGroup.chunks.length }} 个片段</span>
+        </button>
+        <div class="file-actions">
           <button
             v-if="fileGroup.kb_id && fileGroup.file_id"
             class="view-file-btn"
             @click.stop="openFileDetail(fileGroup)"
-            title="查看文件"
+            title="查看完整文件"
+            aria-label="查看完整文件"
           >
             <Eye :size="14" />
           </button>
-        </div>
-
-        <div v-if="expandedFiles.has(fileGroup.filename)" class="chunks-container">
-          <div
-            v-for="(chunk, index) in fileGroup.chunks"
-            :key="getChunkKey(chunk, index)"
-            class="chunk-item"
-            :class="{
-              'high-relevance': typeof chunk.score === 'number' && chunk.score > 0.5,
-              'is-citation-highlighted': highlightedSource === chunk.citation_source
-            }"
-            :data-citation-source="chunk.citation_source || undefined"
-            @click="openChunkDetail(chunk, chunk.citation_index || index + 1)"
-          >
-            <div class="chunk-summary">
-              <span v-if="chunk.citation_index" class="citation-badge">
-                {{ chunk.citation_index }}
-              </span>
-              <span v-else class="chunk-index">候选</span>
-              <div class="chunk-scores">
-                <span v-if="chunk.source_type === 'document_window'" class="score-item"
-                  >阅读范围</span
-                >
-                <span v-if="typeof chunk.score === 'number'" class="score-item"
-                  >检索分 {{ formatRetrievalScore(chunk.score) }}</span
-                >
-                <span v-if="typeof chunk.rerank_score === 'number'" class="score-item"
-                  >重排序 {{ (chunk.rerank_score * 100).toFixed(0) }}%</span
-                >
-                <span v-if="getLineRange(chunk)" class="score-item">{{ getLineRange(chunk) }}</span>
-              </div>
-              <span class="chunk-preview">{{ getPreviewText(chunk.content) }}</span>
-              <Eye :size="14" class="view-icon" />
-            </div>
-          </div>
         </div>
       </div>
     </div>
@@ -73,11 +33,7 @@
       <p>{{ emptyText }}</p>
     </div>
 
-    <KbChunkDetailModal
-      v-model:open="modalVisible"
-      :chunk="selectedChunk"
-      :title-prefix="detailTitlePrefix"
-    />
+    <KbFileChunksModal v-model:open="chunksModalVisible" :file-group="selectedFileGroup" />
 
     <FileDetailModal
       v-model:open="fileDetailOpen"
@@ -88,10 +44,11 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { FileText, ChevronRight, ChevronDown, Eye } from 'lucide-vue-next'
-import KbChunkDetailModal from './KbChunkDetailModal.vue'
+import { computed, ref } from 'vue'
+import { FileText, Eye } from '@lucide/vue'
+import KbFileChunksModal from './KbFileChunksModal.vue'
 import FileDetailModal from '@/components/FileDetailModal.vue'
+import { groupKnowledgeChunks } from '@/utils/kbResultGroups.js'
 
 const props = defineProps({
   chunks: {
@@ -102,26 +59,17 @@ const props = defineProps({
     type: Boolean,
     default: true
   },
-  defaultExpanded: {
-    type: Boolean,
-    default: false
-  },
   emptyText: {
     type: String,
     default: '未找到相关知识库内容'
   }
 })
 
-const expandedFiles = ref(new Set())
-const modalVisible = ref(false)
-const selectedChunk = ref(null)
-const selectedChunkIndex = ref(null)
+const chunksModalVisible = ref(false)
+const selectedFileGroup = ref(null)
 const fileDetailOpen = ref(false)
 const fileDetailKbId = ref('')
 const fileDetailFileId = ref('')
-const listRef = ref(null)
-const highlightedSource = ref('')
-let highlightTimer = null
 
 const resolveChunks = (input) => {
   if (Array.isArray(input)) return input
@@ -152,6 +100,8 @@ const normalizedChunks = computed(() =>
       return {
         ...item,
         score: typeof item.score === 'number' ? item.score : metadata.score,
+        rerank_score:
+          typeof item.rerank_score === 'number' ? item.rerank_score : metadata.rerank_score,
         metadata: {
           ...metadata,
           source,
@@ -162,76 +112,12 @@ const normalizedChunks = computed(() =>
 )
 
 const fileGroupList = computed(() => {
-  const groups = new Map()
-  for (const item of normalizedChunks.value) {
-    const filename = item?.metadata?.source || '未知来源'
-    if (!groups.has(filename)) {
-      groups.set(filename, {
-        filename,
-        kb_id: item?.kb_id || '',
-        file_id: item?.file_id || '',
-        chunks: []
-      })
-    }
-    groups.get(filename).chunks.push(item)
-  }
-
-  return Array.from(groups.values()).sort((a, b) => a.filename.localeCompare(b.filename))
+  return groupKnowledgeChunks(normalizedChunks.value)
 })
 
-watch(
-  fileGroupList,
-  (groups) => {
-    const validFilenames = new Set(groups.map((item) => item.filename))
-    if (props.defaultExpanded) {
-      expandedFiles.value = validFilenames
-      return
-    }
-
-    // 工具调用结果默认折叠，仅清理已经失效的手动展开项。
-    expandedFiles.value = new Set(
-      [...expandedFiles.value].filter((filename) => validFilenames.has(filename))
-    )
-  },
-  { immediate: true }
-)
-
-const toggleFile = (filename) => {
-  if (expandedFiles.value.has(filename)) {
-    expandedFiles.value.delete(filename)
-  } else {
-    expandedFiles.value.add(filename)
-  }
-}
-
-const getChunkKey = (chunk, index) => {
-  if (chunk?.metadata?.chunk_id) return `${chunk.metadata.chunk_id}-${index}`
-  return `${chunk?.metadata?.source || 'chunk'}-${index}`
-}
-
-const getPreviewText = (text = '') => {
-  const content = String(text)
-  return content.length <= 100 ? content : `${content.substring(0, 100)}...`
-}
-
-const formatRetrievalScore = (score) => Number(score).toFixed(3)
-
-const getLineRange = (chunk) => {
-  const startLine = Number(chunk?.metadata?.start_line || 0)
-  const endLine = Number(chunk?.metadata?.end_line || 0)
-  if (!startLine || !endLine) return ''
-  return startLine === endLine ? `第 ${startLine} 行` : `第 ${startLine}-${endLine} 行`
-}
-
-const detailTitlePrefix = computed(() => {
-  const sourceLabel = selectedChunk.value?.source_type === 'document_window' ? '文档阅读范围' : '文档片段'
-  return `${sourceLabel} #${selectedChunkIndex.value || '-'} `
-})
-
-const openChunkDetail = (chunk, index) => {
-  selectedChunk.value = chunk
-  selectedChunkIndex.value = index
-  modalVisible.value = true
+const openFileChunksModal = (fileGroup) => {
+  selectedFileGroup.value = fileGroup
+  chunksModalVisible.value = true
 }
 
 const openFileDetail = (fileGroup) => {
@@ -239,37 +125,6 @@ const openFileDetail = (fileGroup) => {
   fileDetailFileId.value = fileGroup.file_id || ''
   fileDetailOpen.value = Boolean(fileDetailKbId.value && fileDetailFileId.value)
 }
-
-const revealSource = async (citationSource) => {
-  const source = String(citationSource || '')
-  if (!source) return false
-
-  const fileGroup = fileGroupList.value.find((group) =>
-    group.chunks.some((chunk) => chunk.citation_source === source)
-  )
-  if (!fileGroup) return false
-
-  expandedFiles.value = new Set([...expandedFiles.value, fileGroup.filename])
-  highlightedSource.value = source
-  await nextTick()
-
-  const target = [...(listRef.value?.querySelectorAll('[data-citation-source]') || [])].find(
-    (element) => element.dataset.citationSource === source
-  )
-  target?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-
-  if (highlightTimer) window.clearTimeout(highlightTimer)
-  highlightTimer = window.setTimeout(() => {
-    highlightedSource.value = ''
-  }, 1800)
-  return true
-}
-
-onBeforeUnmount(() => {
-  if (highlightTimer) window.clearTimeout(highlightTimer)
-})
-
-defineExpose({ revealSource })
 </script>
 
 <style scoped lang="less">
@@ -291,63 +146,71 @@ defineExpose({ revealSource })
     gap: 6px;
   }
 
-  .file-group {
+  .file-group-item {
     border: 1px solid var(--gray-150);
     border-radius: 8px;
     background: var(--gray-0);
-    overflow: hidden;
+    padding: 6px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    transition: all 0.15s ease;
 
-    .file-header {
-      padding: 5px 10px;
+    &:hover {
+      background: var(--gray-25);
+      border-color: var(--gray-200);
+    }
+
+    .file-info {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      gap: 8px;
+      flex: 1;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      text-align: left;
       cursor: pointer;
-      background: var(--gray-10);
 
-      &:hover {
-        background: var(--gray-25);
+      &:focus-visible {
+        outline: 2px solid var(--main-400);
+        outline-offset: 2px;
+        border-radius: 4px;
       }
 
-      &.is-citation-highlighted {
-        background: var(--main-10);
-        box-shadow: inset 3px 0 0 var(--main-color);
+      .file-icon {
+        flex-shrink: 0;
+        color: var(--gray-600);
       }
 
-      &.expanded {
-        background: var(--gray-25);
-        border-bottom: 1px solid var(--gray-100);
-      }
-
-      .file-info {
-        display: flex;
-        align-items: center;
-        gap: 8px;
+      .file-name {
+        font-size: 13px;
+        color: var(--gray-800);
+        font-weight: 500;
         flex: 1;
         min-width: 0;
-
-        .expand-icon {
-          flex-shrink: 0;
-          color: var(--gray-500);
-        }
-
-        .file-name {
-          font-size: 13px;
-          color: var(--gray-700);
-          font-weight: 400;
-          flex: 1;
-          min-width: 0;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
-        .chunk-count {
-          font-size: 11px;
-          color: var(--gray-700);
-          white-space: nowrap;
-        }
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
+
+      .chunk-count {
+        font-size: 11px;
+        color: var(--gray-600);
+        background: var(--gray-50);
+        border: 1px solid var(--gray-150);
+        padding: 1px 6px;
+        border-radius: 10px;
+        white-space: nowrap;
+      }
+    }
+
+    .file-actions {
+      display: flex;
+      align-items: center;
+      margin-left: 8px;
 
       .view-file-btn {
         flex-shrink: 0;
@@ -366,87 +229,6 @@ defineExpose({ revealSource })
         &:hover {
           background: var(--gray-100);
           color: var(--gray-700);
-        }
-      }
-    }
-
-    .chunk-item {
-      padding: 6px 10px;
-      border-bottom: 1px solid var(--gray-100);
-      cursor: pointer;
-
-      &:last-child {
-        border-bottom: none;
-      }
-
-      &.high-relevance {
-        background: var(--gray-5);
-      }
-
-      &:hover {
-        background: var(--gray-25);
-      }
-
-      .chunk-summary {
-        display: grid;
-        grid-template-columns: 32px auto minmax(0, 1fr) 14px;
-        align-items: center;
-        gap: 8px;
-
-        .chunk-index {
-          width: 32px;
-          box-sizing: border-box;
-          color: var(--gray-700);
-          font-size: 11px;
-          text-align: center;
-          background: var(--gray-25);
-          border-radius: 4px;
-          padding: 1px 4px;
-        }
-
-        .citation-badge {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          justify-self: center;
-          width: 18px;
-          height: 18px;
-          border-radius: 50%;
-          background: var(--main-10);
-          color: var(--main-color);
-          font-size: 11px;
-          font-weight: 600;
-          line-height: 1;
-        }
-
-        .chunk-scores {
-          display: flex;
-          gap: 6px;
-
-          .score-item {
-            font-size: 11px;
-            color: var(--gray-700);
-            background: var(--gray-25);
-            border: 1px solid var(--gray-100);
-            border-radius: 4px;
-            padding: 1px 5px;
-            white-space: nowrap;
-          }
-        }
-
-        .chunk-preview {
-          flex: 1;
-          min-width: 0;
-          font-size: 12px;
-          color: var(--gray-700);
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
-        .view-icon {
-          color: var(--gray-700);
-          opacity: 0.5;
         }
       }
     }

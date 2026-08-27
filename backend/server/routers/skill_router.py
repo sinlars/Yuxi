@@ -11,25 +11,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
 from yuxi.agents.skills.service import (
+    confirm_personal_skill_install_draft,
     confirm_skill_install_draft,
     create_skill_node,
     delete_skill,
     delete_skill_node,
     delete_skills_batch,
+    delete_personal_skill,
     discard_skill_install_draft,
     export_skill_zip,
     get_allowed_skill_access_levels,
     get_manageable_skill_or_raise,
-    get_management_readable_skill_or_raise,
     get_skill_dependency_options,
     get_skill_tree,
     init_builtin_skills,
     is_builtin_skill,
     list_accessible_skills,
+    list_skill_cards_for_user,
     list_skills,
     list_visible_skills_for_management,
     prepare_remote_skill_install,
     prepare_skill_upload,
+    read_personal_skill_file,
     read_skill_file,
     update_skill_dependencies,
     update_skill_enabled,
@@ -37,6 +40,7 @@ from yuxi.agents.skills.service import (
     update_skill_share_config,
     user_can_manage_skill,
 )
+from yuxi.permissions import resolve_skill_permission
 from yuxi.agents.skills.remote_install import list_remote_skills, search_remote_skills
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
@@ -71,7 +75,7 @@ class SkillDependenciesUpdateRequest(BaseModel):
 
 
 class RemoteSkillSourceRequest(BaseModel):
-    source: str = Field(..., description="skills 仓库来源，如 owner/repo 或 GitHub URL")
+    source: str = Field(..., description="远程 Skill 来源，如 owner/repo 或允许的 HTTPS URL")
 
 
 class RemoteSkillPrepareRequest(RemoteSkillSourceRequest):
@@ -86,8 +90,16 @@ class SkillBatchDeleteRequest(BaseModel):
     slugs: list[str] = Field(..., max_length=50, description="需要批量删除的 skill slug 列表，最多支持 50 个")
 
 
-class SkillDraftConfirmRequest(BaseModel):
+class _DraftConfirmRequestBase(BaseModel):
+    slugs: list[str] | None = Field(None, description="本次确认安装的 Skill slug")
+
+
+class SkillDraftConfirmRequest(_DraftConfirmRequestBase):
     share_config: dict | None = Field(None, description="共享权限配置")
+
+
+class PersonalSkillDraftConfirmRequest(_DraftConfirmRequestBase):
+    pass
 
 
 def _raise_from_value_error(e: ValueError) -> None:
@@ -114,8 +126,26 @@ def _summarize_results(results: list[dict]) -> dict[str, int]:
 def _serialize_skill_for_user(item, user: User) -> dict:
     data = item.to_dict()
     data["can_manage"] = user_can_manage_skill(user, item)
+    data["effective_permission"] = resolve_skill_permission(user, item).value
     data["is_builtin"] = is_builtin_skill(item)
     return data
+
+
+@user_skills.get("")
+async def list_skill_cards_route(
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        items = await list_skill_cards_for_user(db, current_user)
+        return {
+            "success": True,
+            "data": [_serialize_skill_for_user(item, current_user) for item in items],
+            "allowed_access_levels": get_allowed_skill_access_levels(current_user),
+        }
+    except Exception as e:
+        logger.error(f"Failed to list Skill cards: {e}")
+        raise HTTPException(status_code=500, detail="获取 Skill 列表失败")
 
 
 @user_skills.get("/accessible")
@@ -153,7 +183,10 @@ async def prepare_skill_upload_route(
 
 
 @user_skills.post("/remote/list")
-async def list_remote_skills_route(payload: RemoteSkillSourceRequest, _current_user: User = Depends(get_required_user)):
+async def list_remote_skills_route(
+    payload: RemoteSkillSourceRequest,
+    _current_user: User = Depends(get_required_user),
+):
     try:
         return {"success": True, "data": await list_remote_skills(payload.source)}
     except ValueError as e:
@@ -201,7 +234,7 @@ async def prepare_remote_skills_route(
 async def confirm_skill_install_draft_route(
     draft_id: str,
     payload: SkillDraftConfirmRequest,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -209,6 +242,7 @@ async def confirm_skill_install_draft_route(
             db,
             draft_id=draft_id,
             share_config=payload.share_config,
+            slugs=payload.slugs,
             operator=current_user,
         )
         return {"success": True, "data": results, "summary": _summarize_results(results)}
@@ -217,6 +251,59 @@ async def confirm_skill_install_draft_route(
     except Exception as e:
         logger.error(f"Failed to confirm skill install draft '{draft_id}': {e}")
         raise HTTPException(status_code=500, detail="确认安装 Skill 失败")
+
+
+@user_skills.post("/personal/install-drafts/{draft_id}/confirm")
+async def confirm_personal_skill_install_draft_route(
+    draft_id: str,
+    payload: PersonalSkillDraftConfirmRequest,
+    current_user: User = Depends(get_required_user),
+):
+    try:
+        results = await confirm_personal_skill_install_draft(
+            draft_id=draft_id,
+            slugs=payload.slugs,
+            operator=current_user,
+        )
+        return {"success": True, "data": results, "summary": _summarize_results(results)}
+    except ValueError as e:
+        _raise_from_value_error(e)
+    except Exception as e:
+        logger.error(f"Failed to confirm personal Skill draft '{draft_id}': {e}")
+        raise HTTPException(status_code=500, detail="确认安装个人 Skill 失败")
+
+
+@user_skills.get("/personal/{slug}/file")
+async def read_personal_skill_file_route(
+    slug: str,
+    path: str = Query(..., description="相对 Skill 根目录的文件路径"),
+    current_user: User = Depends(get_required_user),
+):
+    try:
+        return {
+            "success": True,
+            "data": await read_personal_skill_file(str(current_user.uid), slug, path),
+        }
+    except ValueError as e:
+        _raise_from_value_error(e)
+    except Exception as e:
+        logger.error(f"Failed to read personal Skill file '{slug}/{path}': {e}")
+        raise HTTPException(status_code=500, detail="读取个人 Skill 文件失败")
+
+
+@user_skills.delete("/personal/{slug}")
+async def delete_personal_skill_route(
+    slug: str,
+    current_user: User = Depends(get_required_user),
+):
+    try:
+        await delete_personal_skill(str(current_user.uid), slug)
+        return {"success": True}
+    except ValueError as e:
+        _raise_from_value_error(e)
+    except Exception as e:
+        logger.error(f"Failed to delete personal Skill '{slug}': {e}")
+        raise HTTPException(status_code=500, detail="删除个人 Skill 失败")
 
 
 @user_skills.delete("/install-drafts/{draft_id}")
@@ -336,8 +423,7 @@ async def get_skill_tree_route(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        await get_management_readable_skill_or_raise(db, current_user, slug)
-        return {"success": True, "data": await get_skill_tree(db, slug)}
+        return {"success": True, "data": await get_skill_tree(db, slug=slug, operator=current_user)}
     except ValueError as e:
         _raise_from_value_error(e)
     except Exception as e:
@@ -353,8 +439,10 @@ async def get_skill_file_route(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        await get_management_readable_skill_or_raise(db, current_user, slug)
-        return {"success": True, "data": await read_skill_file(db, slug, path)}
+        return {
+            "success": True,
+            "data": await read_skill_file(db, slug=slug, relative_path=path, operator=current_user),
+        }
     except ValueError as e:
         _raise_from_value_error(e)
     except Exception as e:
@@ -370,7 +458,6 @@ async def create_skill_file_route(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        await get_manageable_skill_or_raise(db, current_user, slug)
         await create_skill_node(
             db,
             slug=slug,
@@ -378,6 +465,7 @@ async def create_skill_file_route(
             is_dir=payload.is_dir,
             content=payload.content,
             updated_by=current_user.uid,
+            operator=current_user,
         )
         return {"success": True}
     except ValueError as e:
@@ -395,13 +483,13 @@ async def update_skill_file_route(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        await get_manageable_skill_or_raise(db, current_user, slug)
         await update_skill_file(
             db,
             slug=slug,
             relative_path=payload.path,
             content=payload.content,
             updated_by=current_user.uid,
+            operator=current_user,
         )
         return {"success": True}
     except ValueError as e:
@@ -443,8 +531,7 @@ async def delete_skill_file_route(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        await get_manageable_skill_or_raise(db, current_user, slug)
-        await delete_skill_node(db, slug=slug, relative_path=path)
+        await delete_skill_node(db, slug=slug, relative_path=path, operator=current_user)
         return {"success": True}
     except ValueError as e:
         _raise_from_value_error(e)
@@ -461,8 +548,7 @@ async def export_skill_route(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        await get_manageable_skill_or_raise(db, current_user, slug)
-        export_path, download_name = await export_skill_zip(db, slug)
+        export_path, download_name = await export_skill_zip(db, slug=slug, operator=current_user)
         background_tasks.add_task(_cleanup_export_file, export_path)
         return FileResponse(path=export_path, media_type="application/zip", filename=download_name)
     except ValueError as e:
@@ -479,8 +565,7 @@ async def delete_skill_route(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        await get_manageable_skill_or_raise(db, current_user, slug)
-        await delete_skill(db, slug=slug)
+        await delete_skill(db, slug=slug, operator=current_user)
         return {"success": True}
     except ValueError as e:
         _raise_from_value_error(e)
@@ -496,9 +581,7 @@ async def delete_skills_batch_route(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        for slug in payload.slugs:
-            await get_manageable_skill_or_raise(db, current_user, slug)
-        results = await delete_skills_batch(db, slugs=payload.slugs)
+        results = await delete_skills_batch(db, slugs=payload.slugs, operator=current_user)
         return {"success": True, "data": results, "summary": _summarize_results(results)}
     except ValueError as e:
         _raise_from_value_error(e)

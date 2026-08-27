@@ -14,11 +14,26 @@
             class="conversation-item"
             :class="{ active: currentChatId === chat.id }"
             @click="$emit('select-chat', chat.id)"
+            @dblclick.stop="renameChat(chat.id)"
             @click.middle="$emit('delete-chat', chat.id)"
           >
             <span class="conversation-title">{{ chat.title || '新的对话' }}</span>
             <span class="actions-mask"></span>
-            <span class="conversation-actions" @click.stop>
+            <span
+              v-if="chat.thread_status === 'loading'"
+              class="thread-status thread-status-loading"
+              role="status"
+              title="正在运行"
+            >
+              <Loader2 :size="12" />
+            </span>
+            <span
+              v-else-if="chat.thread_status === 'ready'"
+              class="thread-status thread-status-ready"
+              role="status"
+              title="有新回复"
+            ></span>
+            <span class="conversation-actions" @click.stop @dblclick.stop>
               <a-dropdown :trigger="['click']">
                 <template #overlay>
                   <a-menu>
@@ -74,7 +89,7 @@
 <script setup>
 import { computed, h, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { ChevronDown, MoreVertical, Pin, PinOff, SquarePen, Trash2 } from 'lucide-vue-next'
+import { ChevronDown, Loader2, MoreVertical, Pin, PinOff, SquarePen, Trash2 } from '@lucide/vue'
 import { parseToShanghai } from '@/utils/time'
 
 const props = defineProps({
@@ -133,22 +148,23 @@ const renameChat = async (chatId) => {
   let newTitle = chat.title || ''
   Modal.confirm({
     title: '重命名对话',
-    content: h('div', { style: { marginTop: '12px' } }, [
+    icon: null,
+    closable: false,
+    maskClosable: true,
+    centered: true,
+    width: 400,
+    class: 'rename-conversation-modal',
+    content: h('div', [
+      h('p', { class: 'rename-conversation-description' }, '保持简短且易于识别'),
       h('input', {
         value: newTitle,
-        style: {
-          width: '100%',
-          padding: '4px 8px',
-          border: '1px solid var(--gray-150)',
-          background: 'var(--gray-0)',
-          borderRadius: '4px'
-        },
+        class: 'rename-conversation-input',
         onInput: (event) => {
           newTitle = event.target.value
         }
       })
     ]),
-    okText: '确认',
+    okText: '保存',
     cancelText: '取消',
     onOk: () => {
       if (!newTitle.trim()) {
@@ -160,6 +176,68 @@ const renameChat = async (chatId) => {
   })
 }
 </script>
+
+<style lang="less">
+.rename-conversation-modal {
+  .ant-modal-content {
+    padding: 22px 24px 20px;
+    border-radius: 12px;
+  }
+
+  .ant-modal-confirm-title {
+    color: var(--gray-900);
+    font-size: 18px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .ant-modal-confirm-body .ant-modal-confirm-content {
+    width: 100%;
+    max-width: none !important;
+    margin-top: 4px;
+  }
+
+  .ant-modal-confirm-btns {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 18px;
+
+    .ant-btn {
+      min-width: 68px;
+      height: 34px;
+      margin-inline-start: 0;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+  }
+}
+
+.rename-conversation-description {
+  margin: 0 0 14px;
+  color: var(--gray-500);
+  font-size: 13px;
+}
+
+.rename-conversation-input {
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  color: var(--gray-900);
+  background: var(--gray-0);
+  border: 1px solid var(--gray-150);
+  border-radius: 8px;
+  outline: none;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+
+  &:focus {
+    border-color: var(--main-400);
+    box-shadow: 0 0 0 2px var(--main-50);
+  }
+}
+</style>
 
 <style lang="less" scoped>
 .conversation-nav-section {
@@ -176,6 +254,36 @@ const renameChat = async (chatId) => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.thread-status {
+  position: absolute;
+  top: 50%;
+  right: 16px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--main-color);
+  pointer-events: none;
+  transform: translateY(-50%) translateX(50%);
+}
+
+.thread-status-loading {
+  :deep(svg) {
+    animation: thread-status-spin 1s linear infinite;
+  }
+}
+
+.thread-status-ready {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--main-color);
+}
+
+@keyframes thread-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .history-panel {
@@ -224,7 +332,7 @@ const renameChat = async (chatId) => {
   display: flex;
   align-items: center;
   width: 100%;
-  height: 36px;
+  height: 32px;
   padding: 0 8px;
   overflow: hidden;
   border: 1px solid transparent;
@@ -247,7 +355,7 @@ const renameChat = async (chatId) => {
     }
 
     .actions-mask {
-      background: linear-gradient(to right, transparent, var(--gray-50));
+      background: linear-gradient(to right, transparent, var(--gray-50) 28px);
     }
 
     .more-btn {
@@ -257,11 +365,15 @@ const renameChat = async (chatId) => {
     .pinned-indicator {
       display: none;
     }
+
+    .thread-status {
+      display: none;
+    }
   }
 
   &.active {
-    background-color: color-mix(in srgb, var(--main-color) 8%, var(--gray-0));
-    color: var(--main-color);
+    background-color: color-mix(in srgb, var(--gray-100) 6%, var(--gray-100));
+    color: var(--gray-1000);
 
     .conversation-title {
       font-weight: 600;
@@ -272,7 +384,7 @@ const renameChat = async (chatId) => {
       background: linear-gradient(
         to right,
         transparent,
-        color-mix(in srgb, var(--main-color) 8%, var(--gray-0)) 20px
+        color-mix(in srgb, var(--gray-100) 6%, var(--gray-100)) 28px
       );
     }
   }
@@ -291,7 +403,7 @@ const renameChat = async (chatId) => {
   right: 0;
   bottom: 0;
   width: 56px;
-  background: linear-gradient(to right, transparent, var(--main-5) 20px);
+  background: linear-gradient(to right, transparent, var(--main-5) 28px);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.2s ease;

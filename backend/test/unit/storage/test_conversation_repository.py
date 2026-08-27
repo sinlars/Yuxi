@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -47,11 +47,11 @@ def test_normalize_title_trims_spaces():
     assert normalized == "hello world"
 
 
-@pytest.mark.asyncio
-async def test_list_conversations_excludes_invocation_sources(conversation_session):
+def _seed_invocation_excluding_conversations() -> tuple[Conversation, Conversation, Conversation, datetime]:
     now = utc_now_naive()
     normal = Conversation(
         thread_id="thread-normal",
+        project_id="project-thread-normal",
         uid="user-a",
         agent_id="agent-a",
         title="Normal",
@@ -62,6 +62,7 @@ async def test_list_conversations_excludes_invocation_sources(conversation_sessi
     )
     agent_call = Conversation(
         thread_id="thread-call",
+        project_id="project-thread-call",
         uid="user-a",
         agent_id="agent-a",
         title="Agent Call Run",
@@ -73,6 +74,7 @@ async def test_list_conversations_excludes_invocation_sources(conversation_sessi
     )
     agent_eval = Conversation(
         thread_id="thread-eval",
+        project_id="project-thread-eval",
         uid="user-a",
         agent_id="agent-a",
         title="Agent Evaluation Run",
@@ -81,6 +83,12 @@ async def test_list_conversations_excludes_invocation_sources(conversation_sessi
         updated_at=now + timedelta(minutes=1),
         extra_metadata={"source": "agent_evaluation"},
     )
+    return normal, agent_call, agent_eval, now
+
+
+@pytest.mark.asyncio
+async def test_list_conversations_excludes_invocation_sources(conversation_session):
+    normal, agent_call, agent_eval, _ = _seed_invocation_excluding_conversations()
     conversation_session.add_all([normal, agent_call, agent_eval])
     await conversation_session.commit()
 
@@ -100,6 +108,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
     now = utc_now_naive()
     active = Conversation(
         thread_id="thread-active",
+        project_id="project-thread-active",
         uid="user-a",
         agent_id="agent-a",
         title="Active Thread",
@@ -109,6 +118,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
     )
     deleted = Conversation(
         thread_id="thread-deleted",
+        project_id="project-thread-deleted",
         uid="user-a",
         agent_id="agent-a",
         title="Deleted Thread",
@@ -118,6 +128,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
     )
     other_user = Conversation(
         thread_id="thread-other-user",
+        project_id="project-thread-other-user",
         uid="user-b",
         agent_id="agent-a",
         title="Other User Thread",
@@ -127,6 +138,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
     )
     tool_only = Conversation(
         thread_id="thread-tool-only",
+        project_id="project-thread-tool-only",
         uid="user-a",
         agent_id="agent-a",
         title="Tool Only Thread",
@@ -187,37 +199,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
 
 @pytest.mark.asyncio
 async def test_search_conversations_by_message_content_excludes_invocation_sources(conversation_session):
-    now = utc_now_naive()
-    normal = Conversation(
-        thread_id="thread-normal",
-        uid="user-a",
-        agent_id="agent-a",
-        title="Normal",
-        status="active",
-        created_at=now,
-        updated_at=now,
-        extra_metadata={},
-    )
-    agent_call = Conversation(
-        thread_id="thread-call",
-        uid="user-a",
-        agent_id="agent-a",
-        title="Agent Call Run",
-        status="active",
-        created_at=now,
-        updated_at=now + timedelta(minutes=2),
-        extra_metadata={"source": "agent_call"},
-    )
-    agent_eval = Conversation(
-        thread_id="thread-eval",
-        uid="user-a",
-        agent_id="agent-a",
-        title="Agent Evaluation Run",
-        status="active",
-        created_at=now,
-        updated_at=now + timedelta(minutes=1),
-        extra_metadata={"source": "agent_evaluation"},
-    )
+    normal, agent_call, agent_eval, now = _seed_invocation_excluding_conversations()
     conversation_session.add_all([normal, agent_call, agent_eval])
     await conversation_session.flush()
     conversation_session.add_all(
@@ -260,6 +242,7 @@ async def test_search_conversations_by_message_content_filters_agent_and_paginat
     old = now - timedelta(days=1)
     first = Conversation(
         thread_id="thread-first",
+        project_id="project-thread-first",
         uid="user-a",
         agent_id="agent-a",
         title="First",
@@ -269,6 +252,7 @@ async def test_search_conversations_by_message_content_filters_agent_and_paginat
     )
     second = Conversation(
         thread_id="thread-second",
+        project_id="project-thread-second",
         uid="user-a",
         agent_id="agent-a",
         title="Second",
@@ -278,6 +262,7 @@ async def test_search_conversations_by_message_content_filters_agent_and_paginat
     )
     other_agent = Conversation(
         thread_id="thread-other-agent",
+        project_id="project-thread-other-agent",
         uid="user-a",
         agent_id="agent-b",
         title="Other Agent",

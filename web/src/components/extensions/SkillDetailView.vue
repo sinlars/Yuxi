@@ -10,7 +10,7 @@
       </button>
       <div class="detail-title-area">
         <div class="detail-icon">
-          <BookMarked :size="18" />
+          <WandSparkles :size="18" />
         </div>
         <div class="detail-title-text">
           <h2>{{ currentSkill?.name || slug }}</h2>
@@ -343,7 +343,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import {
   ArrowLeft,
-  BookMarked,
+  WandSparkles,
   Download,
   Trash2,
   Save,
@@ -356,7 +356,7 @@ import {
   X,
   Plus,
   ChevronDown
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { skillApi } from '@/apis/skill_api'
 import AgentFilePreview from '@/components/AgentFilePreview.vue'
 import FileTreeComponent from '@/components/FileTreeComponent.vue'
@@ -386,7 +386,11 @@ const createForm = reactive({ path: '', isDir: false, content: '' })
 const allowedSkillAccessLevels = ref(['user'])
 const enabledForm = ref(true)
 const shareConfigFormRef = ref(null)
-const shareConfigForm = ref({ access_level: 'user', department_ids: [], user_uids: [] })
+const shareConfigForm = ref({
+  version: 2,
+  read_scope: { access_level: 'user', department_ids: [], user_uids: [] },
+  manage_scope: null
+})
 const dependencyOptions = reactive({ tools: [], mcps: [], skills: [] })
 const dependencyForm = reactive({
   tool_dependencies: [],
@@ -425,7 +429,8 @@ const currentSkillStatusLabel = computed(() => {
 const selectedFilePreview = computed(() => ({
   content: fileContent.value,
   previewType: 'text',
-  supported: true
+  supported: true,
+  status: 'ready'
 }))
 
 const toolDependencyOptions = computed(() =>
@@ -517,9 +522,29 @@ const goBack = () => {
 }
 
 const cloneShareConfig = (config) => ({
-  access_level: config?.access_level || 'user',
-  department_ids: [...(config?.department_ids || [])],
-  user_uids: [...(config?.user_uids || [])]
+  version: 2,
+  read_scope:
+    config?.version === 2
+      ? config.read_scope
+        ? {
+            access_level: config.read_scope.access_level || 'global',
+            department_ids: [...(config.read_scope.department_ids || [])],
+            user_uids: [...(config.read_scope.user_uids || [])]
+          }
+        : null
+      : {
+          access_level: config?.access_level || 'user',
+          department_ids: [...(config?.department_ids || [])],
+          user_uids: [...(config?.user_uids || [])]
+        },
+  manage_scope:
+    config?.version === 2 && config.manage_scope
+      ? {
+          access_level: config.manage_scope.access_level || 'global',
+          department_ids: [...(config.manage_scope.department_ids || [])],
+          user_uids: [...(config.manage_scope.user_uids || [])]
+        }
+      : null
 })
 
 const syncShareConfigFromSkill = (skillRecord) => {
@@ -586,9 +611,6 @@ const resetFileState = () => {
   fileContent.value = ''
 }
 
-const expandAllKeys = (nodes) =>
-  nodes.flatMap((node) => (node.is_dir ? [node.key, ...expandAllKeys(node.children || [])] : []))
-
 const reloadTree = async () => {
   if (!currentSkill.value || !isInstalledSkill.value) return
   loading.value = true
@@ -596,7 +618,7 @@ const reloadTree = async () => {
     const result = await skillApi.getSkillTree(currentSkill.value.slug)
     const normalized = normalizeTree(result?.data || [])
     treeData.value = normalized
-    expandedKeys.value = expandAllKeys(normalized)
+    expandedKeys.value = []
   } catch {
     message.error('加载目录树失败')
   } finally {
@@ -814,7 +836,9 @@ onMounted(() => {
 
 .tree-container {
   width: 240px;
-  border-right: 1px solid var(--gray-150);
+  order: 2;
+  border-left: 1px solid var(--gray-150);
+  background: var(--gray-0);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
