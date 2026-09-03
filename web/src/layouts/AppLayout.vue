@@ -321,7 +321,7 @@ provide('settingsModal', {
     <div class="header">
       <div class="sidebar-brand" @click.stop>
         <router-link v-if="!sidebarCollapsed" to="/" class="brand-link">
-          <img :src="infoStore.organization.avatar" class="brand-avatar" />
+          <!-- <img :src="infoStore.organization.avatar" class="brand-avatar" /> -->
           <span class="brand-name">{{ organizationName }}</span>
         </router-link>
         <button
@@ -426,7 +426,7 @@ provide('settingsModal', {
         />
       </div>
       <div class="foo">
-        <div class="github nav-item" @click.stop>
+        <!-- <div class="github nav-item" @click.stop>
           <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
             <template #title>欢迎 Star</template>
             <a href="https://github.com/xerrors/Yuxi" target="_blank" class="github-link">
@@ -437,7 +437,7 @@ provide('settingsModal', {
               </span>
             </a>
           </a-tooltip>
-        </div>
+        </div> -->
         <!-- 用户信息组件 -->
         <div class="nav-item user-info" @click.stop>
           <UserInfoComponent :show-role="!sidebarCollapsed">
