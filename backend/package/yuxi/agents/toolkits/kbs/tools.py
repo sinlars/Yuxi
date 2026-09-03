@@ -6,6 +6,7 @@ import tempfile
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
@@ -14,8 +15,11 @@ from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend
 from yuxi.agents.toolkits.registry import tool
 from yuxi.knowledge.schemas import (
     FindInputSchema,
+    FindOutputSchema,
     OpenInputSchema,
+    OpenOutputSchema,
     SearchInputSchema,
+    SearchOutputSchema,
 )
 from yuxi.utils import logger
 
@@ -165,7 +169,8 @@ async def query_kb(kb_id: str, query_text: str, file_name: str | None = None, ru
 
     try:
         kwargs = {"file_name": file_name} if file_name else {}
-        return await _get_knowledge_base().retrieve(target_kb_id, query_text, **kwargs)
+        raw_result = await _get_knowledge_base().retrieve(target_kb_id, query_text, **kwargs)
+        return await _build_query_output(target_kb_id, raw_result)
     except Exception as e:
         logger.error(f"检索失败: {e}")
         return f"检索失败: {str(e)}"
@@ -202,12 +207,31 @@ async def open_kb_document(
 
     try:
         start_offset = int(line) - 1 if line is not None else int(offset or 0)
-        return await _get_knowledge_base().open_document(
+        window = await _get_knowledge_base().open_document(
             target_kb_id,
             normalized_file_id,
             offset=start_offset,
             limit=window_size,
         )
+        if not isinstance(window, dict):
+            return window
+        # 不同后端实现可能已把 kb_id/file_id 写回 window 字典；先 pop 掉，避免传给
+        # OpenOutputSchema 时与显式参数重复（"got multiple values for keyword argument 'kb_id'"）。
+        normalized_window = dict(window)
+        normalized_window.pop("kb_id", None)
+        normalized_window.pop("file_id", None)
+        citation_source = _kb_citation_source(
+            normalized_kb_id,
+            normalized_file_id,
+            start_line=int(normalized_window.get("start_line") or 0),
+            end_line=int(normalized_window.get("end_line") or 0),
+        )
+        return OpenOutputSchema(
+            kb_id=normalized_kb_id,
+            file_id=normalized_file_id,
+            citation_source=citation_source,
+            **normalized_window,
+        ).model_dump()
     except Exception as e:
         logger.error(f"打开知识库文档失败: {e}")
         return f"打开知识库文档失败: {str(e)}"
@@ -246,7 +270,7 @@ async def find_kb_document(
         return target_error
 
     try:
-        return await _get_knowledge_base().find_in_document(
+        result = await _get_knowledge_base().find_in_document(
             target_kb_id,
             normalized_file_id,
             patterns,
@@ -255,6 +279,33 @@ async def find_kb_document(
             max_windows=max_windows,
             window_size=window_size,
         )
+        if not isinstance(result, dict):
+            return result
+        # 避免 result 中已存在的 kb_id/file_id 与显式参数冲突（同 OpenOutputSchema 根因）
+        normalized_result = dict(result)
+        normalized_result.pop("kb_id", None)
+        normalized_result.pop("file_id", None)
+        windows = []
+        for window in normalized_result.get("windows") or []:
+            if not isinstance(window, dict):
+                windows.append(window)
+                continue
+            windows.append(
+                {
+                    **window,
+                    "citation_source": _kb_citation_source(
+                        normalized_kb_id,
+                        normalized_file_id,
+                        start_line=int(window.get("start_line") or 0),
+                        end_line=int(window.get("end_line") or 0),
+                    ),
+                }
+            )
+        return FindOutputSchema(
+            kb_id=normalized_kb_id,
+            file_id=normalized_file_id,
+            **{**normalized_result, "windows": windows},
+        ).model_dump()
     except Exception as e:
         logger.error(f"知识库文档内检索失败: {e}")
         return f"知识库文档内检索失败: {str(e)}"
@@ -447,6 +498,45 @@ def _find_query_target(
     if normalized_kb_id not in visible_kb_ids:
         return None, f"知识库资源 '{normalized_kb_id}' 不存在或当前会话未启用"
     return normalized_kb_id, None
+
+
+def _kb_citation_source(
+    kb_id: str,
+    file_id: str,
+    *,
+    chunk_id: str = "",
+    start_line: int = 0,
+    end_line: int = 0,
+) -> str:
+    """生成稳定的知识库来源标识，供正文 <cite> 标记与前端溯源使用。"""
+    source = f"kb://{quote(str(kb_id), safe='')}/{quote(str(file_id), safe='')}"
+    if chunk_id:
+        return f"{source}?chunk={quote(str(chunk_id), safe='')}"
+    if start_line > 0:
+        return f"{source}?lines={start_line}-{max(start_line, end_line)}"
+    return source
+
+
+async def _build_query_output(target_kb_id: str, result: Any) -> Any:
+    """为检索结果补充 citation_source，并保持既有 SearchOutputSchema 契约。"""
+    if isinstance(result, dict) and result.get("kb_id") == target_kb_id and isinstance(result.get("results"), list):
+        output = SearchOutputSchema(**result).model_dump()
+    else:
+        from yuxi.knowledge.base import KnowledgeBase
+
+        output = KnowledgeBase.build_search_output(target_kb_id, result)
+
+    if not isinstance(output, dict) or not isinstance(output.get("results"), list):
+        return output
+    for item in output["results"]:
+        if not isinstance(item, dict):
+            continue
+        item["citation_source"] = _kb_citation_source(
+            target_kb_id,
+            str(item.get("file_id") or ""),
+            chunk_id=str(item.get("id") or ""),
+        )
+    return SearchOutputSchema(**output).model_dump()
 
 
 def _runtime_sandbox_scope(runtime: ToolRuntime | None) -> tuple[str, str, str, str] | None:

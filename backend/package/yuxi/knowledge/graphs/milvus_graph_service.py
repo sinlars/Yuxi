@@ -168,7 +168,8 @@ class MilvusGraphService:
                 build_task_status = "completed"
                 build_task_progress = 100
             elif latest_task and latest_task.status in {"failed", "cancelled"}:
-                build_task_status = "failed"
+                if pending_chunks > 0:
+                    build_task_status = "failed"
 
         return {
             "kb_id": kb_id,
