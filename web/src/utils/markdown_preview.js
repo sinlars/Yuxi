@@ -6,6 +6,7 @@ import { createHighlighter } from 'shiki'
 import { load as yamlLoad } from 'js-yaml'
 import { escapeHtml } from './html.js'
 import { normalizeCodeLanguage } from './file_preview.js'
+import { normalizeBrokenMarkdownEmphasis } from './markdown_normalizer.js'
 import { renderSvgBlocks } from './svgRenderer.js'
 import { renderHtmlPreviewBlocks } from './htmlPreviewRenderer.js'
 
@@ -216,7 +217,7 @@ const setCachedHtml = (cacheKey, html) => {
 
 export const renderMarkdown = async (content, { theme = 'github-light' } = {}) => {
   try {
-    const normalizedContent = normalizeHtmlTagQuotes(normalizeLegacyMinioPublicUrls(content))
+    const normalizedContent = normalizeBrokenMarkdownEmphasis(normalizeHtmlTagQuotes(normalizeLegacyMinioPublicUrls(content)))
     const htmlPreviewContent = renderHtmlPreviewBlocks(normalizedContent, {
       sanitizeHtml: sanitizeHtmlPreviewSrcdoc
     })
@@ -248,6 +249,9 @@ export const renderMarkdown = async (content, { theme = 'github-light' } = {}) =
         'checked',
         'disabled',
         'source',
+        'data-citation-source',
+        'aria-label',
+        'title',
         'colspan',
         'rowspan'
       ]

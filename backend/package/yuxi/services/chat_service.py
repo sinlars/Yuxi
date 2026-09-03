@@ -494,8 +494,8 @@ async def _save_tool_message(conv_repo: ConversationRepository, msg_dict: dict, 
     if not tool_call_id:
         return
 
-    if isinstance(content, list):
-        tool_output = json.dumps(content) if content else ""
+    if isinstance(content, (dict, list)):
+        tool_output = json.dumps(content, ensure_ascii=False, default=str) if content else ""
     else:
         tool_output = str(content)
 
@@ -1648,7 +1648,8 @@ async def get_agent_state_view(
             "agent_state": extract_agent_state(
                 values,
                 workdir_path=runtime_workdir_path(workdir_path),
-            )
+            ),
+            "latest_run_status": getattr(latest_run, "status", None),
         }
         interrupt_info = _extract_interrupt_info(state) if state else None
         if latest_run and latest_run.status == "interrupted" and interrupt_info:

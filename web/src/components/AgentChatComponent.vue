@@ -89,6 +89,7 @@
                     :message="displayItem.message"
                     :is-processing="isDisplayMessageProcessing(row.conv, displayItem)"
                     :show-refs="showMsgRefs(displayItem.message, row.conv)"
+                    :sources="getConversationSources(row.conv)"
                     :hide-tool-calls="true"
                     :mention="mentionConfig"
                     @retry="retryMessage(displayItem.message)"
@@ -551,6 +552,9 @@
                               {{ todo.displayContent }}
                             </span>
                           </div>
+                          <span v-if="todo.status === 'cancelled'" class="todo-item-status">
+                            已取消
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -842,6 +846,7 @@ import { useUserStore } from '@/stores/user'
 import { storeToRefs } from 'pinia'
 import { mergeMessageDebugMessages } from '@/utils/messageDebug'
 import { MessageProcessor } from '@/utils/messageProcessor'
+import { parseMentionText } from '@/utils/mention_utils'
 import { agentApi, threadApi } from '@/apis'
 import HumanApprovalModal from '@/components/HumanApprovalModal.vue'
 import { extractPendingInterrupt, useApproval } from '@/composables/useApproval'
@@ -1701,8 +1706,13 @@ const currentTodos = computed(() => {
   if (!Array.isArray(todos)) return []
   return todos.map((todo) => {
     const fullContent = String(todo?.content || '')
+    const status =
+      currentThreadState.value?.latestRunStatus === 'cancelled' && todo?.status !== 'completed'
+        ? 'cancelled'
+        : todo?.status
     return {
       ...todo,
+      status,
       fullContent,
       displayContent: formatTodoName(fullContent)
     }
@@ -2196,7 +2206,8 @@ const conversations = computed(() => {
   if (activeRunOngoingMessages.length > 0) {
     const onGoingConv = {
       messages: activeRunOngoingMessages,
-      status: 'streaming'
+      // finished 消息可能先于历史刷新到达，立即进入完成态以展示操作栏和实时工具来源。
+      status: currentThreadState.value?.isStreaming ? 'streaming' : 'finished'
     }
     return [...activeRunHistoryConvs, onGoingConv]
   }
@@ -2803,6 +2814,7 @@ const fetchAgentState = async (agentId, threadId, { required = false } = {}) => 
     if (!latestState || latestState.agentStateRequestVersion !== requestVersion) return false
 
     latestState.agentState = res.agent_state || null
+    latestState.latestRunStatus = res.latest_run_status || null
     const pendingInterrupt = extractPendingInterrupt(res.interrupt, threadId)
     // resume 已开始或 active run 已切换时，旧 checkpoint 响应不能重新显示审批。
     const interruptIsCurrent =
@@ -3235,14 +3247,33 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
   if ((threadMessages.value[threadId] || []).length === 0) {
     const autoTitle = text.replace(/\s+/g, ' ').trim().slice(0, 2000)
     if (autoTitle) {
+      // 将 @knowledge:xxx 等提及前缀从标题生成请求中分离：只把非提及部分
+      // 发给模型生成标题，再把提及前缀拼回去，避免模型丢掉 @ 前缀。
+      const segments = parseMentionText(autoTitle)
+      const mentionPrefix = segments
+        .filter((s) => s.kind === 'mention')
+        .map((s) => s.raw)
+        .join(' ')
+      const nonMentionText = segments
+        .filter((s) => s.kind === 'text')
+        .map((s) => s.text)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+      const titleInput = mentionPrefix
+        ? nonMentionText || autoTitle
+        : autoTitle
       void (async () => {
         try {
           const generatedTitle = await agentApi.generateTitle(
-            autoTitle,
+            titleInput,
             configStore.config?.fast_model
           )
           if (generatedTitle) {
-            const finalTitle = generatedTitle.slice(0, 30).replace(/\s+/g, ' ').trim()
+            const baseTitle = generatedTitle.slice(0, 30).replace(/\s+/g, ' ').trim()
+            const finalTitle = mentionPrefix
+              ? `${mentionPrefix} ${baseTitle}`.slice(0, 30).replace(/\s+/g, ' ').trim()
+              : baseTitle
             if (finalTitle) {
               void chatThreadsStore.updateThread(threadId, finalTitle).catch(() => {})
             }
@@ -3616,9 +3647,25 @@ const showMsgRefs = (msg, conv) => {
   return false
 }
 
-const getConversationSources = (conv) => {
-  return MessageProcessor.extractSourcesFromConversation(conv, availableKnowledgeBases.value)
-}
+const conversationSources = computed(() => {
+  const result = new Map()
+  const previousConversations = []
+  for (const conv of conversations.value) {
+    result.set(
+      conv,
+      MessageProcessor.extractSourcesFromConversation(
+        conv,
+        availableKnowledgeBases.value,
+        previousConversations
+      )
+    )
+    previousConversations.push(conv)
+  }
+  return result
+})
+
+const getConversationSources = (conv) =>
+  conversationSources.value.get(conv) || { knowledgeChunks: [], webSources: [] }
 
 // ==================== LIFECYCLE & WATCHERS ====================
 const loadChatsList = async () => {
@@ -5304,6 +5351,13 @@ watch(currentChatId, (threadId, oldThreadId) => {
 
 .todo-item-body {
   min-width: 0;
+  flex: 1;
+}
+
+.todo-item-status {
+  flex-shrink: 0;
+  color: var(--color-error-700);
+  font-size: 12px;
 }
 
 .todo-item-text {

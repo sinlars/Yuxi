@@ -68,7 +68,7 @@
       <main class="hero-section">
         <div class="hero-content">
           <p class="hero-eyebrow reveal-up">
-            <span class="eyebrow-dot"></span>开源 · 医学知识库 × 智能体
+            <span class="eyebrow-dot"></span>权威案例 · 医学知识库 × 智能体
           </p>
           <h1 class="title reveal-up delay-1">
             <span class="title-line">探索</span><span class="title-line title-accent">医学知识</span><span class="title-line">的边界</span>
@@ -96,12 +96,12 @@
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M6.5 2H20V22H6.5A2.5 2.5 0 0 1 4 19.5V2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
               </svg>
-              <span>查看文档</span>
+              <span>其他产品</span>
             </a>
           </div>
           <p class="trust-line reveal-up delay-2">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M2 12H7L9 6L13 18L15 12H22" stroke="#12B5AC" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M2 12H7L9 6L13 18L15 12H22" stroke="#4d6bfe" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
             循证医学 · 临床指南 · 科研文献 · 智能问答
           </p>
@@ -160,7 +160,7 @@ import medLogo from '@/assets/medLogo.png'
 const router = useRouter()
 const userStore = useUserStore()
 const infoStore = useInfoStore()
-const docsUrl = 'https://xerrors.github.io/Yuxi/'
+const docsUrl = 'https://cspmmed.com/'
 
 // 加载状态
 const isLoading = ref(true)
@@ -338,7 +338,7 @@ onUnmounted(() => {
   left: -120px;
   width: 620px;
   height: 460px;
-  background: radial-gradient(closest-side, rgba(18, 181, 172, 0.07), transparent 70%);
+  background: radial-gradient(closest-side, rgba(77, 107, 254, 0.07), transparent 70%);
   animation: glowDriftTeal 34s ease-in-out infinite alternate;
 }
 
@@ -385,7 +385,7 @@ onUnmounted(() => {
 }
 
 .ecg-dot-teal {
-  fill: #12b5ac;
+  fill: #4d6bfe;
   opacity: 0.45;
 }
 
@@ -426,6 +426,16 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+
+  :deep(.ant-btn-primary) {
+    background: #4d6bfe;
+    border-color: #4d6bfe;
+
+    &:hover {
+      background: #3b5bfd;
+      border-color: #3b5bfd;
+    }
+  }
 }
 
 // ============== Hero ==============
@@ -486,8 +496,8 @@ onUnmounted(() => {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #12b5ac;
-  box-shadow: 0 0 0 3px rgba(18, 181, 172, 0.15);
+  background: #4d6bfe;
+  box-shadow: 0 0 0 3px rgba(77, 107, 254, 0.15);
   animation: pulse 2.5s ease-in-out infinite;
 }
 

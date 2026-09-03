@@ -9,6 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Awaitable, Callable
 
 from arq.worker import RetryJob
 from sqlalchemy import select, text
@@ -130,6 +131,7 @@ class TerminalTransition:
 class RunContext:
     run_id: str
     worker_id: str
+    cancel_callback: Callable[[], Awaitable[None]] | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     _watch_task: asyncio.Task | None = None
     _durable_cancel_task: asyncio.Task | None = None
@@ -169,6 +171,10 @@ class RunContext:
             self.cancel_event.set()
             return True
         return False
+
+    async def cancel_active_work(self) -> None:
+        if self.cancel_callback is not None:
+            await self.cancel_callback()
 
     async def _watch_cancel_signal(self) -> None:
         while not self.cancel_event.is_set():
@@ -758,6 +764,7 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
         done, _ = await asyncio.wait({next_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
 
         if cancel_task in done:
+            await run_ctx.cancel_active_work()
             next_task.cancel()
             await asyncio.gather(next_task, return_exceptions=True)
             raise asyncio.CancelledError(f"run {run_ctx.run_id} cancelled")
@@ -768,6 +775,26 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
             yield next_task.result()
         except StopAsyncIteration:
             return
+
+
+async def _destroy_run_sandbox(
+    *,
+    thread_id: str,
+    uid: str,
+    file_thread_id: str,
+    skills_thread_id: str,
+) -> None:
+    """Stop the active shell command by destroying its ephemeral sandbox container."""
+    try:
+        await asyncio.to_thread(
+            get_sandbox_provider().destroy,
+            thread_id,
+            uid=uid,
+            file_thread_id=file_thread_id,
+            skills_thread_id=skills_thread_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Failed to destroy sandbox while cancelling thread {thread_id}: {exc}")
 
 
 async def process_agent_run(ctx, run_id: str):
@@ -810,7 +837,42 @@ async def process_agent_run(ctx, run_id: str):
     request_id = run.request_id
     thread_id = run.conversation_thread_id
     user = None
-    run_ctx = RunContext(run_id=run_id, worker_id=worker_id)
+    if await _is_cancel_requested(run_id):
+        # 在构造 RunContext 前先检查预取消信号，避免随后创建的 cancel_callback 被过早调用。
+        raise asyncio.CancelledError(f"run {run_id} cancelled before execution")
+
+    if not isinstance(run.input_payload, dict):
+        await mark_run_terminal(
+            run_id,
+            "failed",
+            "invalid_input_payload",
+            "run input_payload 必须是对象",
+            worker_id=worker_id,
+        )
+        return
+    payload = run.input_payload
+    runtime = payload.get("runtime") or {}
+    if not isinstance(runtime, dict):
+        await mark_run_terminal(
+            run_id,
+            "failed",
+            "invalid_runtime_payload",
+            "run input_payload.runtime 必须是对象",
+            worker_id=worker_id,
+        )
+        return
+    file_thread_id = str(runtime.get("file_thread_id") or thread_id) if run_type == "subagent" else thread_id
+    skills_thread_id = str(runtime.get("skills_thread_id") or thread_id) if run_type == "subagent" else thread_id
+    run_ctx = RunContext(
+        run_id=run_id,
+        worker_id=worker_id,
+        cancel_callback=lambda: _destroy_run_sandbox(
+            thread_id=thread_id,
+            uid=uid,
+            file_thread_id=file_thread_id,
+            skills_thread_id=skills_thread_id,
+        ),
+    )
     writer = ChunkedEventWriter(
         run_id=run_id,
         thread_id=thread_id,
@@ -821,27 +883,6 @@ async def process_agent_run(ctx, run_id: str):
         if await _is_cancel_requested(run_id):
             run_ctx.cancel_event.set()
             raise asyncio.CancelledError(f"run {run_id} cancelled before execution")
-
-        if not isinstance(run.input_payload, dict):
-            await mark_run_terminal(
-                run_id,
-                "failed",
-                "invalid_input_payload",
-                "run input_payload 必须是对象",
-                worker_id=worker_id,
-            )
-            return
-        payload = run.input_payload
-        runtime = payload.get("runtime") or {}
-        if not isinstance(runtime, dict):
-            await mark_run_terminal(
-                run_id,
-                "failed",
-                "invalid_runtime_payload",
-                "run input_payload.runtime 必须是对象",
-                worker_id=worker_id,
-            )
-            return
 
         input_message = await _load_input_message(run.input_message_id)
         if not input_message:

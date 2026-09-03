@@ -1,12 +1,20 @@
 <template>
-  <div class="web-search-result-list">
+  <div ref="listRef" class="web-search-result-list">
     <div v-if="results.length > 0" class="search-results">
       <div
         v-for="(result, index) in results"
         :key="getItemKey(result, index)"
         class="search-result-item"
+        :class="{ 'is-citation-highlighted': highlightedSource === result.citation_source }"
+        :data-citation-source="result.citation_source || undefined"
       >
         <div class="result-header">
+          <span class="source-status">
+            <span v-if="result.citation_index" class="citation-badge">
+              {{ result.citation_index }}
+            </span>
+            <span v-else class="candidate-badge">候选</span>
+          </span>
           <h5 class="result-title">
             <a :href="result.url" target="_blank" rel="noopener noreferrer">
               {{ result.title }}
@@ -30,7 +38,9 @@
 </template>
 
 <script setup>
-defineProps({
+import { onBeforeUnmount, ref } from 'vue'
+
+const props = defineProps({
   results: {
     type: Array,
     default: () => []
@@ -41,11 +51,38 @@ defineProps({
   }
 })
 
+const listRef = ref(null)
+const highlightedSource = ref('')
+let highlightTimer = null
+
 const getItemKey = (item, index) => {
   if (item?.url) return item.url
   if (item?.title) return `${item.title}-${index}`
   return `${index}`
 }
+
+const revealSource = (citationSource) => {
+  const source = String(citationSource || '')
+  if (!source || !props.results.some((result) => result.citation_source === source)) return false
+
+  highlightedSource.value = source
+  const target = [...(listRef.value?.querySelectorAll('[data-citation-source]') || [])].find(
+    (element) => element.dataset.citationSource === source
+  )
+  target?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+
+  if (highlightTimer) window.clearTimeout(highlightTimer)
+  highlightTimer = window.setTimeout(() => {
+    highlightedSource.value = ''
+  }, 1800)
+  return true
+}
+
+onBeforeUnmount(() => {
+  if (highlightTimer) window.clearTimeout(highlightTimer)
+})
+
+defineExpose({ revealSource })
 </script>
 
 <style scoped lang="less">
@@ -62,12 +99,51 @@ const getItemKey = (item, index) => {
     border-radius: 8px;
     background: var(--gray-0);
 
+    &.is-citation-highlighted {
+      background: var(--main-10);
+      box-shadow: inset 3px 0 0 var(--main-color);
+    }
+
     .result-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 8px;
       margin-bottom: 4px;
+
+      .source-status {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 32px;
+        width: 32px;
+      }
+
+      .citation-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: var(--main-10);
+        color: var(--main-color);
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1;
+      }
+
+      .candidate-badge {
+        width: 32px;
+        box-sizing: border-box;
+        padding: 1px 4px;
+        border-radius: 4px;
+        background: var(--gray-25);
+        color: var(--gray-700);
+        font-size: 11px;
+        line-height: 16px;
+        text-align: center;
+      }
 
       .result-title {
         margin: 0;
