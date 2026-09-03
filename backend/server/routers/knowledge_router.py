@@ -504,6 +504,22 @@ async def index_graph_build(
         if not graph_status.get("locked"):
             raise HTTPException(status_code=400, detail="请先确认并锁定图谱抽取配置")
 
+        async def run_graph_index(context: TaskContext):
+            await context.set_message("任务初始化")
+            await context.set_progress(5.0, "准备构建图谱")
+            result = await service.build_pending_chunks(kb_id, context=context)
+            await context.set_result(result)
+            if result["remaining"]:
+                raise RuntimeError(
+                    f"图谱构建未全部完成：成功 {result['success']} 个，失败 {result['failed']} 个，"
+                    f"剩余 {result['remaining']} 个，可重新提交任务继续处理"
+                )
+            await context.set_progress(
+                100.0,
+                f"图谱构建执行完成，成功 {result['success']} 个，抽取失败 {result['extraction_failed']} 个",
+            )
+            return result
+
         task, created = await tasker.enqueue_unique_by_payload(
             name=f"图谱构建 ({database.name})",
             task_type=GRAPH_TASK_TYPE,

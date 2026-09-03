@@ -1,7 +1,7 @@
 <template>
-  <div class="kb-result-grouped-list">
+  <div ref="listRef" class="kb-result-grouped-list">
     <div v-if="showSummary" class="result-summary">
-      找到 {{ normalizedChunks.length }} 个相关文档片段，来自 {{ fileGroupList.length }} 个文件
+      找到 {{ normalizedChunks.length }} 个知识库来源，来自 {{ fileGroupList.length }} 个文件
     </div>
 
     <div class="kb-results" v-if="normalizedChunks.length > 0">
@@ -44,7 +44,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { FileText, Eye } from '@lucide/vue'
 import KbFileChunksModal from './KbFileChunksModal.vue'
 import FileDetailModal from '@/components/FileDetailModal.vue'
@@ -59,6 +59,10 @@ const props = defineProps({
     type: Boolean,
     default: true
   },
+  defaultExpanded: {
+    type: Boolean,
+    default: false
+  },
   emptyText: {
     type: String,
     default: '未找到相关知识库内容'
@@ -70,6 +74,10 @@ const selectedFileGroup = ref(null)
 const fileDetailOpen = ref(false)
 const fileDetailKbId = ref('')
 const fileDetailFileId = ref('')
+const listRef = ref(null)
+const highlightedSource = ref('')
+const expandedFiles = ref(new Set())
+let highlightTimer = null
 
 const resolveChunks = (input) => {
   if (Array.isArray(input)) return input
@@ -115,6 +123,24 @@ const fileGroupList = computed(() => {
   return groupKnowledgeChunks(normalizedChunks.value)
 })
 
+watch(
+  fileGroupList,
+  (groups) => {
+    const validFilenames = new Set(groups.map((item) => item.filename))
+    if (props.defaultExpanded) {
+      expandedFiles.value = validFilenames
+      return
+    }
+
+    // 工具调用结果默认折叠，仅清理已经失效的手动展开项。
+    expandedFiles.value = new Set(
+      [...expandedFiles.value].filter((filename) => validFilenames.has(filename))
+    )
+  }
+)
+
+const formatRetrievalScore = (score) => Number(score).toFixed(3)
+
 const openFileChunksModal = (fileGroup) => {
   selectedFileGroup.value = fileGroup
   chunksModalVisible.value = true
@@ -125,6 +151,37 @@ const openFileDetail = (fileGroup) => {
   fileDetailFileId.value = fileGroup.file_id || ''
   fileDetailOpen.value = Boolean(fileDetailKbId.value && fileDetailFileId.value)
 }
+
+const revealSource = async (citationSource) => {
+  const source = String(citationSource || '')
+  if (!source) return false
+
+  const fileGroup = fileGroupList.value.find((group) =>
+    group.chunks.some((chunk) => chunk.citation_source === source)
+  )
+  if (!fileGroup) return false
+
+  expandedFiles.value = new Set([...expandedFiles.value, fileGroup.filename])
+  highlightedSource.value = source
+  await nextTick()
+
+  const target = [...(listRef.value?.querySelectorAll('[data-citation-source]') || [])].find(
+    (element) => element.dataset.citationSource === source
+  )
+  target?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+
+  if (highlightTimer) window.clearTimeout(highlightTimer)
+  highlightTimer = window.setTimeout(() => {
+    highlightedSource.value = ''
+  }, 1800)
+  return true
+}
+
+onBeforeUnmount(() => {
+  if (highlightTimer) window.clearTimeout(highlightTimer)
+})
+
+defineExpose({ revealSource })
 </script>
 
 <style scoped lang="less">

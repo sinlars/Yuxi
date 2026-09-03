@@ -172,7 +172,15 @@ export function useAgentStreamHandler({
 
       case 'error':
         streamSmoother?.flushThread(threadId)
-        handleChatError({ message: chunkMessage }, 'stream')
+        {
+          const errorType = chunk.error_type
+          const errorMessage = chunk.error_message
+          if (errorType === 'model_access_denied' || errorType === 'model_unavailable') {
+            message.error(errorMessage || chunkMessage)
+          } else {
+            handleChatError({ message: errorMessage || chunkMessage }, 'stream')
+          }
+        }
         // Stop the loading indicator
         if (threadState) {
           threadState.isStreaming = false

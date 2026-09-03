@@ -208,15 +208,19 @@ class KnowledgeChunkRepository:
         limit: int,
         *,
         after_id: int = 0,
+        exclude_chunk_ids: set[str] | None = None,
     ) -> list[KnowledgeChunk]:
         async with pg_manager.get_async_session_context() as session:
+            conditions = [
+                KnowledgeChunk.kb_id == kb_id,
+                KnowledgeChunk.graph_indexed.is_not(True),
+                KnowledgeChunk.id > after_id,
+            ]
+            if exclude_chunk_ids:
+                conditions.append(KnowledgeChunk.chunk_id.notin_(exclude_chunk_ids))
             result = await session.execute(
                 select(KnowledgeChunk)
-                .where(
-                    KnowledgeChunk.kb_id == kb_id,
-                    KnowledgeChunk.graph_indexed.is_not(True),
-                    KnowledgeChunk.id > after_id,
-                )
+                .where(*conditions)
                 .order_by(KnowledgeChunk.id.asc())
                 .limit(max(limit, 1))
             )
