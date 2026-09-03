@@ -15,6 +15,7 @@ class SearchResultSchema(BaseModel):
     file_id: str = Field(default="", description="结果所属文件 ID，可用于 Find/Open")
     content: str = Field(description="chunk 内容")
     metadata: dict[str, Any] = Field(default_factory=dict, description="来源、分数、chunk_index 等附加信息")
+    citation_source: str = Field(default="", description="正文引用使用的稳定来源标识")
 
 
 class SearchOutputSchema(BaseModel):
@@ -37,6 +38,7 @@ class FindWindowSchema(BaseModel):
     end_line: int = Field(description="窗口结束行号，1-based")
     matched_lines: list[int] = Field(default_factory=list, description="该窗口内匹配到的行号")
     content: str = Field(description="带行号的窗口内容")
+    citation_source: str = Field(default="", description="正文引用使用的稳定来源标识")
 
 
 class FindOutputSchema(BaseModel):
@@ -68,3 +70,4 @@ class OpenOutputSchema(BaseModel):
     has_more_after: bool = Field(description="窗口后是否还有内容")
     next_offset: int | None = Field(default=None, description="下一窗口 offset；没有更多内容时为 null")
     content: str = Field(description="带行号的窗口内容")
+    citation_source: str = Field(default="", description="正文引用使用的稳定来源标识")
