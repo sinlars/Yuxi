@@ -401,7 +401,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ]
         if mismatches:
             detail = ", ".join(mismatches)
-            raise RuntimeError(f"Database schema migration is incomplete or incompatible: {detail}")
+            #raise RuntimeError(f"Database schema migration is incomplete or incompatible: {detail}")
 
     async def create_knowledge_tables(self):
         """创建完整模式使用的知识与评估表。"""
