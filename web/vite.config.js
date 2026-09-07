@@ -28,6 +28,7 @@ export default defineConfig(({ mode }) => {
         usePolling: true,
         ignored: ['**/node_modules/**', '**/dist/**']
       },
+      allowedHosts: ['dev.test.com'],
       host: '0.0.0.0'
     }
   }

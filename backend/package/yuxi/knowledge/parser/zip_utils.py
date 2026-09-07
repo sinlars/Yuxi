@@ -102,17 +102,31 @@ def process_zip_file_sync(
     return result
 
 
+IMAGE_DIR_NAMES = (
+    "images", "image", "img", "imgs", "imges",
+    "pictures", "picture", "pics", "pic",
+    "photos", "photo",
+    "assets", "figures", "figure",
+)
+
+
 def find_images_directory(zip_file: zipfile.ZipFile, md_file_path: str) -> str | None:
-    """查找images目录"""
+    """查找图片目录，支持多种常见目录名。"""
     md_parent = Path(md_file_path).parent
 
-    candidates = []
-    if str(md_parent) != ".":
-        candidates.extend([str(md_parent / "images"), str(md_parent.parent / "images")])
-    candidates.append("images")
+    candidates: list[str] = []
+    for dir_name in IMAGE_DIR_NAMES:
+        if str(md_parent) != ".":
+            candidates.append(str(md_parent / dir_name))
+            candidates.append(str(md_parent.parent / dir_name))
+        candidates.append(dir_name)
 
+    seen: set[str] = set()
     for cand in candidates:
         cand_clean = cand.rstrip("/")
+        if cand_clean in seen:
+            continue
+        seen.add(cand_clean)
         if any(n.startswith(cand_clean + "/") for n in zip_file.namelist()):
             return cand_clean
 
@@ -153,10 +167,12 @@ async def process_images(
                 data=data,
             )
 
+            # 保留相对于 images_dir 的完整路径，支持子目录
+            rel_path = img_name[len(images_dir) + 1:]  # images/sub/foo.png -> sub/foo.png
             img_info = {
                 "name": Path(img_name).name,
                 "url": build_kb_image_proxy_url(object_name),
-                "path": f"images/{Path(img_name).name}",
+                "path": f"images/{rel_path}",
             }
             images.append(img_info)
 
@@ -169,32 +185,72 @@ async def process_images(
     return images
 
 
-def replace_image_links(markdown_content: str, images: list[dict]) -> str:
-    """替换markdown中的图片链接为MinIO URL"""
-    if not images:
-        return markdown_content
-
-    image_map = {}
+def _build_image_map(images: list[dict]) -> dict[str, str]:
+    """从图片列表构建多维度查找表。"""
+    image_map: dict[str, str] = {}
     for img in images:
-        path = img["path"]
         url = img["url"]
+        path = img["path"]
         image_map[path] = url
         image_map[f"/{path}"] = url
         image_map[img["name"]] = url
+        # 按路径段拆分：images/sub/foo.png -> 额外注册 sub/foo.png
+        parts = Path(path).parts
+        for i in range(1, len(parts)):
+            suffix = str(Path(*parts[i:]))
+            image_map[suffix] = url
+    return image_map
 
-    def replace_link(match):
+
+def _lookup_url(img_path: str, image_map: dict[str, str]) -> str | None:
+    """在 image_map 中查找 img_path 对应的替换 URL。"""
+    if not img_path:
+        return None
+
+    if img_path in image_map:
+        return image_map[img_path]
+
+    for pattern, url in image_map.items():
+        if img_path.endswith(pattern):
+            return url
+
+    filename = os.path.basename(img_path.replace("\\", "/"))
+    if filename in image_map:
+        return image_map[filename]
+
+    return None
+
+
+def replace_image_links(markdown_content: str, images: list[dict]) -> str:
+    """替换 markdown 中的图片链接为 MinIO 代理 URL。
+
+    同时处理 markdown ![]() 语法和 HTML <img src="..."> 标签。
+    """
+    if not images:
+        return markdown_content
+
+    image_map = _build_image_map(images)
+
+    def replace_md(match: re.Match) -> str:
         alt_text = match.group(1) or ""
         img_path = match.group(2)
+        new_url = _lookup_url(img_path, image_map)
+        if new_url is None:
+            return match.group(0)
+        return f"![{alt_text}]({new_url})"
 
-        for pattern, url in image_map.items():
-            if img_path.endswith(pattern) or img_path == pattern:
-                return f"![{alt_text}]({url})"
+    def replace_html(match: re.Match) -> str:
+        full_tag = match.group(0)
+        img_path = match.group(1)
+        new_url = _lookup_url(img_path, image_map)
+        if new_url is None:
+            return full_tag
+        return full_tag.replace(img_path, new_url)
 
-        filename = os.path.basename(img_path)
-        if filename in image_map:
-            return f"![{alt_text}]({image_map[filename]})"
+    pattern_md = r'!\[([^\]]*)\]\(([^)]+)\)'
+    result = re.sub(pattern_md, replace_md, markdown_content)
 
-        return match.group(0)
+    pattern_html = r'<img\s[^>]*?src=["\']?([^"\'\s>]+)["\']?'
+    result = re.sub(pattern_html, replace_html, result, flags=re.IGNORECASE)
 
-    pattern = r"!\[([^\]]*)\]\(([^)]+)\)"
-    return re.sub(pattern, replace_link, markdown_content)
+    return result

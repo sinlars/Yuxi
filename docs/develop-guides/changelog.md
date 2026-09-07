@@ -137,6 +137,7 @@ v0.7.2.beta1 包含不可逆的数据与文件布局迁移，主要影响历史�
 - embed.py 在 `encode`/`aencode` 请求前以 `logger.warning` 记录超过 4000 字符输入的 index 与长度，便于定位具体哪条 chunk 超长触发 embedding 失败；日志不输出 chunk 内容，避免知识库文本进入应用日志。
 
 
+
 ## v0.7.1 (2026-07-17)
 
 ### 安全
