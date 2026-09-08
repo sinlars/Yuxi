@@ -244,7 +244,9 @@ def replace_image_links(markdown_content: str, images: list[dict]) -> str:
 
     def replace_md(match: re.Match) -> str:
         alt_text = match.group(1) or ""
-        img_path = match.group(2)
+        # Typora 尺寸后缀（如 "images/a.png =413x"）不是路径的一部分，
+        # 剥离后再匹配；标准渲染器不识别该语法，替换时一并去除
+        img_path = re.sub(r"\s+=\d*[xX]?\d*$", "", match.group(2).strip())
         new_url = _lookup_url(img_path, image_map)
         if new_url is None:
             return match.group(0)
