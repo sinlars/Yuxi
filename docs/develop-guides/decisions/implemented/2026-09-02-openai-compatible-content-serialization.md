@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/agents/models.py
+Owner：backend/package/yuxi/models/chat.py
 
 ## 问题
 
@@ -20,7 +20,7 @@ Owner：backend/package/yuxi/agents/models.py
 
 ## 后果
 
-所有 OpenAI 兼容提供商（不仅 yuanzhi-m1）的请求在序列化前都会做一次幂等的 content 归一化：纯文本块列表变字符串对接受字符串的官方端点语义等价，多模态块列表不受影响。同一 `_ToolCallChunkFixChatOpenAI` 还包含流式零 chunk 回退非流式（应对 v2 流式协议下零 chunk 抛 RuntimeError 的另一类“Model call failed after 3 attempts”根因）与流式 tool_call 空串 name/id 归一化，三者同属对 yuanzhi-m1 问答失败的修复。
+所有 OpenAI 兼容提供商（不仅 yuanzhi-m1）的请求在序列化前都会做一次幂等的 content 归一化：纯文本块列表变字符串对接受字符串的官方端点语义等价，多模态块列表不受影响。同一 `ChatCompletionsAdapter` 还包含流式零 chunk 回退非流式（应对 v2 流式协议下零 chunk 抛 RuntimeError 的另一类“Model call failed after 3 attempts”根因）与流式 tool_call 空串 name/id 归一化，三者同属对 yuanzhi-m1 问答失败的修复。
 
 ## 验证
 

@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/agents/models.py
+Owner：backend/package/yuxi/models/chat.py
 
 ## 问题
 
@@ -22,7 +22,7 @@ yuanzhi-m1 问答可以正常出文本回复后，用户发现技能与工具全
 
 ## 替代方案
 
-在端点/网关侧启用原生 function calling。该端点为外部服务，不受本仓库控制，只能由客户端兼容。另一替代是在 deepagents 中间件层解析文本工具调用，但中间件拿到的已是聚合后的消息，无法覆盖流式增量语义，且会与 ModelRetryMiddleware 的重试路径交叉；在模型客户端层（`_ToolCallChunkFixChatOpenAI`）收敛对流式与非流式都成立。
+在端点/网关侧启用原生 function calling。该端点为外部服务，不受本仓库控制，只能由客户端兼容。另一替代是在 deepagents 中间件层解析文本工具调用，但中间件拿到的已是聚合后的消息，无法覆盖流式增量语义，且会与 ModelRetryMiddleware 的重试路径交叉；在模型客户端层（`ChatCompletionsAdapter`）收敛对流式与非流式都成立。
 
 ## 后果
 

@@ -7,7 +7,7 @@
 ``<parameter=dummy>`` 模板残留。langchain 拿到的 tool_calls 恒为空，智能体
 的技能与工具全部失效（模型只能把"调用意图"当正文念出来）。
 
-修复：`_ToolCallChunkFixChatOpenAI` 在请求绑定工具时，把流式 chunk 与非流式
+修复：`ChatCompletionsAdapter` 在请求绑定工具时，把流式 chunk 与非流式
 结果里的文本工具调用还原为原生 tool_calls（`_StreamingTextToolCallParser`），
 并剥掉透传的推理文本；未绑定工具时完全直通。
 
@@ -22,9 +22,9 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import Field
 
-from yuxi.agents.models import (
+from yuxi.models.chat import (
     _StreamingTextToolCallParser,
-    _ToolCallChunkFixChatOpenAI,
+    ChatCompletionsAdapter,
     _extract_text_tool_calls_from_message,
 )
 
@@ -89,7 +89,7 @@ class _TextToolCallProviderMixin(ChatOpenAI):
         )
 
 
-class _FakeTextToolCallModel(_ToolCallChunkFixChatOpenAI, _TextToolCallProviderMixin):
+class _FakeTextToolCallModel(ChatCompletionsAdapter, _TextToolCallProviderMixin):
     """模拟 yuanzhi-m1 的 fake 模型：wrapper 的修复逻辑走真实实现。"""
 
 

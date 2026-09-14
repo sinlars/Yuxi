@@ -9,11 +9,11 @@ langchain-openai 丢弃（delta 为 null / type=content.delta），`_astream`
 RuntimeError("v2 stream finished without producing a message")，
 经 ModelRetryMiddleware 重试后报 "Model call failed after 3 attempts"。
 
-修复：`_ToolCallChunkFixChatOpenAI` 在流式零 chunk 时回退调用非流式
+修复：`ChatCompletionsAdapter` 在流式零 chunk 时回退调用非流式
 `_agenerate`，把完整回复包装成单个 chunk 产出（对齐 0.6.1 / v1 行为）。
 
 本测试用 fake 模型确定性复现（无需网络/API key）。fake 通过一个插在
-`_ToolCallChunkFixChatOpenAI` 与 `ChatOpenAI` 之间 MRO 的 mixin，让 wrapper
+`ChatCompletionsAdapter` 与 `ChatOpenAI` 之间 MRO 的 mixin，让 wrapper
 的 `super()._astream()` 命中“零 chunk”的实现，从而走到 wrapper 的回退逻辑。
 """
 
@@ -23,10 +23,10 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 
-from yuxi.agents.models import (
+from yuxi.models.chat import (
     _EMPTY_ASSISTANT_CONTENT_PLACEHOLDER,
-    _ToolCallChunkFixChatOpenAI,
     _collapse_text_content_blocks,
+    ChatCompletionsAdapter,
 )
 
 
@@ -45,7 +45,7 @@ class _ZeroChunkProviderMixin(ChatOpenAI):
 
     真实链路里 `BaseChatOpenAI._astream` 收到的 SSE 事件 delta 全为 null，被
     `_convert_chunk_to_generation_chunk` 丢弃，`_astream` 零产出。这里直接让
-    `_astream` 零产出等价复现。该 mixin 作为 `_ToolCallChunkFixChatOpenAI` 的
+    `_astream` 零产出等价复现。该 mixin 作为 `ChatCompletionsAdapter` 的
     第二基类，其 `_astream`/`_stream` 会被 wrapper 的 `super()` 命中。
     """
 
@@ -60,7 +60,7 @@ class _ZeroChunkProviderMixin(ChatOpenAI):
         yield  # pragma: no cover - 仅为把函数变成 generator
 
 
-class _FakeZeroChunkModel(_ToolCallChunkFixChatOpenAI, _ZeroChunkProviderMixin):
+class _FakeZeroChunkModel(ChatCompletionsAdapter, _ZeroChunkProviderMixin):
     """模拟 yuanzhi-m1：流式零 chunk，非流式正常返回。
 
     `_astream`/`_stream` 由 `_ZeroChunkProviderMixin` 提供（零 chunk），
@@ -123,7 +123,7 @@ async def test_v2_protocol_no_runtime_error_under_langgraph():
 
 async def test_extract_generate_args_variants():
     """参数还原：位置参数与关键字参数两种调用形态都能正确解析。"""
-    from yuxi.agents.models import _extract_generate_args
+    from yuxi.models.chat import _extract_generate_args
 
     # 位置形态: (messages, stop, run_manager)
     messages, stop, run_manager, kwargs = _extract_generate_args(
@@ -147,7 +147,7 @@ async def test_extract_generate_args_variants():
 
 async def test_message_to_chunk_converts_tool_calls():
     """非流式消息中的 tool_calls 应转换为 tool_call_chunks 形态。"""
-    from yuxi.agents.models import _message_to_chunk
+    from yuxi.models.chat import _message_to_chunk
 
     message = AIMessage(
         content="",
@@ -163,7 +163,7 @@ async def test_message_to_chunk_converts_tool_calls():
 
 async def test_message_to_chunk_without_tool_calls():
     """无 tool_calls 的纯文本消息应正常包装为 chunk（tool_call_chunks 为空列表）。"""
-    from yuxi.agents.models import _message_to_chunk
+    from yuxi.models.chat import _message_to_chunk
 
     message = AIMessage(content="你好")
     chunk = _message_to_chunk(message)
