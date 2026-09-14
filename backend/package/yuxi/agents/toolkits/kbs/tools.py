@@ -215,11 +215,13 @@ async def open_kb_document(
         )
         if not isinstance(window, dict):
             return window
-        # 不同后端实现可能已把 kb_id/file_id 写回 window 字典；先 pop 掉，避免传给
-        # OpenOutputSchema 时与显式参数重复（"got multiple values for keyword argument 'kb_id'"）。
+        # manager.open_document 返回 OpenOutputSchema.model_dump()，已包含
+        # kb_id/file_id/citation_source；先 pop 掉，避免与下方显式参数重复
+        # （"got multiple values for keyword argument"）。
         normalized_window = dict(window)
         normalized_window.pop("kb_id", None)
         normalized_window.pop("file_id", None)
+        normalized_window.pop("citation_source", None)
         citation_source = _kb_citation_source(
             normalized_kb_id,
             normalized_file_id,
