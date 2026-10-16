@@ -4,6 +4,18 @@
       <template #actions>
         <template v-if="!isBatchDeleteMode">
           <a-button
+            class="lucide-icon-btn"
+            aria-label="刷新 Skills"
+            :disabled="loading"
+            @click="fetchSkills"
+          >
+            <RefreshCw
+              :size="14"
+              class="page-shoulder-refresh-icon"
+              :class="{ 'is-spinning': loading }"
+            />
+          </a-button>
+          <a-button
             @click="isBatchDeleteMode = true"
             :disabled="loading || importing || filteredDeletableSkills.length === 0"
             class="lucide-icon-btn"
@@ -30,14 +42,6 @@
               <span>上传 Skill</span>
             </a-button>
           </a-upload>
-          <a-button
-            class="lucide-icon-btn"
-            aria-label="刷新 Skills"
-            :disabled="loading"
-            @click="fetchSkills({ refreshPersonal: true })"
-          >
-            <RefreshCw :size="14" />
-          </a-button>
         </template>
         <template v-else>
           <a-button size="small" type="link" @click="handleBatchSelectAll">全选</a-button>
@@ -218,7 +222,7 @@
               class="lucide-icon-btn"
               @click="goToPreviewSkillManagement"
             >
-              <span>去管理</span>
+              <span>{{ canManageSkill(previewSkill) ? '编辑 Skill' : '查看 Skill' }}</span>
             </a-button>
           </div>
         </div>
@@ -1019,10 +1023,10 @@ const handleBatchDelete = () => {
   })
 }
 
-const fetchSkills = async ({ refreshPersonal = false } = {}) => {
+const fetchSkills = async () => {
   loading.value = true
   try {
-    const skillResult = await skillApi.listSkillCards({ refreshPersonal })
+    const skillResult = await skillApi.listSkillCards()
     skills.value = skillResult?.data || []
   } catch {
     message.error('加载失败')

@@ -9,6 +9,7 @@ import { normalizeCodeLanguage } from './file_preview.js'
 import { normalizeBrokenMarkdownEmphasis } from './markdown_normalizer.js'
 import { renderSvgBlocks } from './svgRenderer.js'
 import { renderHtmlPreviewBlocks } from './htmlPreviewRenderer.js'
+import { createMarkdownRenderCache } from './markdownRenderCache.js'
 
 const markdownKatexPlugin = markdownItKatex.default || markdownItKatex
 const FRONTMATTER_MARKER = '---'
@@ -70,7 +71,7 @@ const renderFrontmatterField = (key, value) => {
 }
 
 const getMarkdownLine = (state, line) => {
-  const start = state.bMarks[line] + state.tShift[line]
+  const start = state.bMarks[line]
   const end = state.eMarks[line]
   return state.src.slice(start, end)
 }
@@ -112,7 +113,17 @@ const markdownItFrontmatterCard = (md) => {
     try {
       data = yamlLoad(rawYaml) || {}
     } catch {
-      return false
+      const foldedDescription = rawYaml.replace(
+        /^description:[ \t]*\n(?=[ \t]+\S)/m,
+        'description: >-\n'
+      )
+      if (foldedDescription === rawYaml) return false
+
+      try {
+        data = yamlLoad(foldedDescription) || {}
+      } catch {
+        return false
+      }
     }
 
     if (!data || typeof data !== 'object' || Array.isArray(data)) return false
@@ -130,8 +141,7 @@ const markdownItFrontmatterCard = (md) => {
 }
 
 const rendererCache = new Map()
-const renderedHtmlCache = new Map()
-const MAX_RENDER_CACHE_SIZE = 100
+const renderedHtmlCache = createMarkdownRenderCache()
 const CODE_FENCE_RE = /(^|\n) {0,3}(```|~~~)/
 const CODE_FENCE_LANGUAGE_RE = /(^|\n) {0,3}(```+|~~~+)[ \t]*([^\s:,`]*)/g
 
@@ -207,14 +217,6 @@ const getRenderer = async (theme, needsHighlight) => {
   return rendererPromise
 }
 
-const getCachedHtml = (cacheKey) => renderedHtmlCache.get(cacheKey)
-const setCachedHtml = (cacheKey, html) => {
-  if (renderedHtmlCache.size >= MAX_RENDER_CACHE_SIZE) {
-    renderedHtmlCache.delete(renderedHtmlCache.keys().next().value)
-  }
-  renderedHtmlCache.set(cacheKey, html)
-}
-
 export const renderMarkdown = async (content, { theme = 'github-light' } = {}) => {
   try {
     const normalizedContent = normalizeBrokenMarkdownEmphasis(normalizeHtmlTagQuotes(normalizeLegacyMinioPublicUrls(content)))
@@ -225,7 +227,7 @@ export const renderMarkdown = async (content, { theme = 'github-light' } = {}) =
     const themeName = normalizeTheme(theme)
     const needsHighlight = hasCodeFence(svgContent)
     const cacheKey = `${needsHighlight ? themeName : 'plain'}\u0000${svgContent}`
-    const cachedHtml = getCachedHtml(cacheKey)
+    const cachedHtml = renderedHtmlCache.get(cacheKey)
     if (cachedHtml !== undefined) return cachedHtml
 
     if (needsHighlight) {
@@ -256,7 +258,7 @@ export const renderMarkdown = async (content, { theme = 'github-light' } = {}) =
         'rowspan'
       ]
     })
-    setCachedHtml(cacheKey, html)
+    renderedHtmlCache.set(cacheKey, html)
     return html
   } catch (error) {
     console.error('Failed to render markdown:', error)

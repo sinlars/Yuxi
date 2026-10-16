@@ -12,7 +12,7 @@
 
 ## 1. 获取代码
 
-仓库当前默认配置对应 `v0.7.3`。这个版本仍处于 Beta 阶段；用于重要数据前，请先阅读[生产部署与升级](../advanced/deployment.md)中的备份和迁移说明。
+仓库当前默认配置对应 `v0.7.3`。用于重要数据前，请先阅读[生产部署与升级](../advanced/deployment.md)中的备份和迁移说明。
 
 ```bash
 git clone --branch v0.7.3 --depth 1 https://github.com/xerrors/Yuxi.git
@@ -128,11 +128,7 @@ docker compose ps milvus etcd minio graph
 docker compose logs --tail=100 milvus etcd minio graph
 ```
 
-这些服务是默认拓扑的一部分；不要用一个“看起来启动成功”的空结果代替依赖故障排查。
-
-### 需要查看详细对话事件
-
-超级管理员可以从头像菜单打开“调试面板”，开启对话 Debug 后查看消息时序和运行元数据。这个面板会展示内部信息，生产环境只在确有排障需要时开启。
+这些服务是默认拓扑的一部分；启动脚本正常退出不等于依赖健康，以 `docker compose ps` 的状态和就绪接口为准。
 
 ## 下一步
 

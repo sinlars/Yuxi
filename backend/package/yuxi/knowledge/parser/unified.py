@@ -19,8 +19,8 @@ from docling.backend.msword_backend import MsWordDocumentBackend
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.document import InputDocument
 from docling_core.types.doc import DoclingDocument
-from langchain_community.document_loaders import PyPDFLoader
 from markdownify import markdownify as md_convert
+from pypdf import PdfReader
 
 from yuxi.knowledge.parser.capabilities import (
     IMAGE_FILE_EXTENSIONS,
@@ -48,10 +48,9 @@ def pdfreader(file_path, params=None):
     assert file_path.exists(), "File not found"
     assert file_path.suffix.lower() == ".pdf", "File format not supported"
 
-    loader = PyPDFLoader(str(file_path))
-    docs = loader.load()
-    text = "\n\n".join([d.page_content for d in docs])
-    return text
+    with file_path.open("rb") as pdf_file:
+        reader = PdfReader(pdf_file)
+        return "\n\n".join(page.extract_text(extraction_mode="plain").strip() for page in reader.pages)
 
 
 def parse_pdf(file, params=None):
@@ -188,7 +187,10 @@ async def parse_resolved_document(source: str, params: dict | None = None) -> st
         elif file_ext == ".csv":
             result = await asyncio.to_thread(_convert_csv_to_markdown, file_path_obj)
 
-        elif file_ext in [".xls", ".xlsx"]:
+        elif file_ext == ".xls":
+            result = await asyncio.to_thread(_convert_xls_to_markdown, file_path_obj)
+
+        elif file_ext == ".xlsx":
             result = await asyncio.to_thread(_convert_with_docling, file_path_obj, params=params)
 
         elif file_ext == ".json":
@@ -379,3 +381,21 @@ def _convert_csv_to_markdown(file_path: Path) -> str:
         row_dataframe = dataframe.iloc[[i]]
         tables.append(row_dataframe.to_markdown(index=False))
     return "\n\n".join(tables)
+
+
+def _convert_xls_to_markdown(file_path: Path) -> str:
+    """使用 pandas + xlrd 解析旧版 .xls 文件并转为 Markdown（Docling 不支持该格式）。"""
+    import pandas as pd
+
+    # 文档提取不假定首行是表头，也不把文本编号和 NA 等字面值转换成分析数据。
+    sheet_map = pd.read_excel(
+        file_path, engine="xlrd", sheet_name=None, header=None, dtype=object, keep_default_na=False
+    )
+    blocks: list[str] = []
+    for sheet_name, dataframe in sheet_map.items():
+        if dataframe.empty:
+            continue
+        if len(sheet_map) > 1:
+            blocks.append(f"## {sheet_name}")
+        blocks.append(dataframe.to_markdown(index=False, headers=[""] * len(dataframe.columns), disable_numparse=True))
+    return "\n\n".join(blocks)

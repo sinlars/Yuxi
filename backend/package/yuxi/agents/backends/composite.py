@@ -13,7 +13,7 @@ from deepagents.middleware.filesystem import (
 from langchain_core.messages import ToolMessage
 
 from yuxi.agents.backends.paths import runtime_workdir_path
-from yuxi.agents.skills.service import refresh_user_skill_projection_async
+from yuxi.services.skills.projection import refresh_user_skill_projection_async
 
 from .sandbox import ProvisionerSandboxBackend
 
@@ -305,9 +305,11 @@ def create_agent_filesystem_middleware(
     tool_token_limit_before_evict: int | None = None,
     *,
     backend: CompositeBackend,
+    disabled_tools: frozenset[str] = frozenset(),
 ) -> FilesystemMiddleware:
+    """构造文件系统中间件，在 ToolNode 注册前排除禁用工具。"""
     return YuxiFilesystemMiddleware(
         backend=backend,
         tool_token_limit_before_evict=tool_token_limit_before_evict,
-        tools=list(_AGENT_FS_TOOLS),
+        tools=[name for name in _AGENT_FS_TOOLS if name not in disabled_tools],
     )

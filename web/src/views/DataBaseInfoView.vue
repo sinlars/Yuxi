@@ -24,25 +24,27 @@
       <template #actions>
         <div class="extension-detail-actions">
           <a-space :size="8">
-            <button
-              type="button"
+            <a-button
+              type="text"
               aria-label="复制知识库 ID"
-              class="lucide-icon-btn extension-panel-action extension-panel-action-secondary"
+              title="复制知识库 ID"
+              class="lucide-icon-btn extension-detail-action"
               @click="copyDatabaseId"
             >
               <Copy :size="14" />
               <span>复制 ID</span>
-            </button>
-            <button
+            </a-button>
+            <a-button
               v-if="canManageDatabase"
-              type="button"
+              type="text"
               aria-label="配置知识库"
-              class="lucide-icon-btn extension-panel-action extension-panel-action-primary"
+              title="配置知识库"
+              class="lucide-icon-btn extension-detail-action"
               @click="showEditModal"
             >
               <Pencil :size="14" />
               <span>配置</span>
-            </button>
+            </a-button>
           </a-space>
         </div>
       </template>
@@ -219,11 +221,7 @@
 
       <template #panel-evaluation>
         <div v-if="isMilvus && activeTab === 'evaluation'" class="tab-panel evaluation-panel">
-          <KnowledgeEvaluationWorkspace
-            v-if="kbId"
-            :kb-id="kbId"
-            :can-manage="canManageDatabase"
-          />
+          <KnowledgeEvaluationWorkspace v-if="kbId" :kb-id="kbId" :can-manage="canManageDatabase" />
         </div>
       </template>
     </ExtensionDetailLayout>
@@ -454,10 +452,7 @@ import FileTable from '@/components/FileTable.vue'
 import FileDetailModal from '@/components/FileDetailModal.vue'
 import FileUploadModal from '@/components/FileUploadModal.vue'
 import FileSearchModal from '@/components/modals/FileSearchModal.vue'
-import KnowledgeGraphSection from '@/components/KnowledgeGraphSection.vue'
 import QuerySection from '@/components/QuerySection.vue'
-import MindMapSection from '@/components/MindMapSection.vue'
-import KnowledgeEvaluationWorkspace from '@/components/evaluation/KnowledgeEvaluationWorkspace.vue'
 import SearchConfigPanel from '@/components/SearchConfigPanel.vue'
 import AiTextarea from '@/components/AiTextarea.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
@@ -467,6 +462,15 @@ import { authApi } from '@/apis/auth_api'
 import { useChunkPresetOptions } from '@/composables/useChunkPresetOptions'
 import { DEFAULT_CHUNK_PRESET_ID } from '@/utils/chunkUtils'
 import { kbUtils } from '@/utils/kb_utils'
+import { createAsyncPanel } from '@/utils/asyncPanel'
+
+const KnowledgeGraphSection = createAsyncPanel(
+  () => import('@/components/KnowledgeGraphSection.vue')
+)
+const MindMapSection = createAsyncPanel(() => import('@/components/MindMapSection.vue'))
+const KnowledgeEvaluationWorkspace = createAsyncPanel(
+  () => import('@/components/evaluation/KnowledgeEvaluationWorkspace.vue')
+)
 
 const route = useRoute()
 const router = useRouter()
@@ -1515,7 +1519,7 @@ onUnmounted(() => {
 }
 
 @media (max-width: 767px) {
-  .extension-detail-actions :deep(.extension-panel-action span) {
+  .extension-detail-actions :deep(.extension-detail-action span) {
     display: none;
   }
 
@@ -1654,5 +1658,4 @@ onUnmounted(() => {
   border: 1px solid var(--gray-100);
   border-radius: 12px;
 }
-
 </style>
