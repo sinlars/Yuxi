@@ -42,6 +42,9 @@ async def test_storage_migration_reads_legacy_schema_before_cutover(monkeypatch)
         upgrade_agent_resource_selection=lambda: _record(
             calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
         ),
+        ensure_resource_schema=lambda: _record(calls, "ensure_resource_schema"),
+        ensure_category_schema=lambda: _record(calls, "ensure_category_schema"),
+        ensure_resource_category_schema=lambda: _record(calls, "ensure_resource_category_schema"),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create_business_tables"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge_tables"),
@@ -115,6 +118,9 @@ async def test_storage_migration_rejects_v071_schema_without_quiescence_proof(mo
         upgrade_agent_resource_selection=lambda: _record(
             calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
         ),
+        ensure_resource_schema=lambda: _record(calls, "ensure_resource_schema"),
+        ensure_category_schema=lambda: _record(calls, "ensure_category_schema"),
+        ensure_resource_category_schema=lambda: _record(calls, "ensure_resource_category_schema"),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
@@ -164,6 +170,9 @@ async def test_current_schema_skips_schema_ddl(monkeypatch):
         upgrade_agent_resource_selection=lambda: _record(
             calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
         ),
+        ensure_resource_schema=lambda: _record(calls, "ensure_resource_schema"),
+        ensure_category_schema=lambda: _record(calls, "ensure_category_schema"),
+        ensure_resource_category_schema=lambda: _record(calls, "ensure_resource_category_schema"),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create_business"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
@@ -199,6 +208,9 @@ async def test_current_schema_skips_schema_ddl(monkeypatch):
         "business_schema",
         "knowledge_schema",
         "checkpoint",
+        "ensure_resource_schema",
+        "ensure_category_schema",
+        "ensure_resource_category_schema",
         f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}",
         f"version:knowledge:{storage_migration.KNOWLEDGE_SCHEMA_VERSION}",
     }.isdisjoint(calls)
@@ -260,6 +272,9 @@ async def test_supported_legacy_business_schema_is_converged_and_versioned_as_cu
         upgrade_agent_resource_selection=lambda: _record(
             calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
         ),
+        ensure_resource_schema=lambda: _record(calls, "ensure_resource_schema"),
+        ensure_category_schema=lambda: _record(calls, "ensure_category_schema"),
+        ensure_resource_category_schema=lambda: _record(calls, "ensure_resource_category_schema"),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create_business"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
@@ -295,6 +310,70 @@ async def test_supported_legacy_business_schema_is_converged_and_versioned_as_cu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("business_version", [11, 12])
+async def test_partial_business_schema_runs_only_remaining_steps(monkeypatch, business_version):
+    """已推进到中间版本的库只补齐剩余步骤，不回写已完成步骤的版本。"""
+    calls: list[str] = []
+    sessions = [_Session(), _Session(), _Session()]
+
+    @asynccontextmanager
+    async def session_context():
+        yield sessions.pop(0)
+
+    manager = SimpleNamespace(
+        initialize=lambda: calls.append("initialize"),
+        schema_migration_lock=lambda: _async_context(calls, "schema_lock"),
+        create_schema_version_table=lambda: _record(calls, "create_schema_version_table"),
+        get_schema_versions=lambda: _async_value(
+            {"business": business_version, "knowledge": storage_migration.KNOWLEDGE_SCHEMA_VERSION}
+        ),
+        upgrade_agent_resource_selection=lambda: _record(
+            calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
+        ),
+        ensure_resource_schema=lambda: _record(calls, "ensure_resource_schema"),
+        ensure_category_schema=lambda: _record(calls, "ensure_category_schema"),
+        ensure_resource_category_schema=lambda: _record(calls, "ensure_resource_category_schema"),
+        record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
+        create_business_tables=lambda: _record(calls, "create_business"),
+        create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
+        ensure_business_schema=lambda: _record(calls, "business_schema"),
+        ensure_knowledge_schema=lambda: _record(calls, "knowledge_schema"),
+        setup_langgraph_checkpointer=lambda: _record(calls, "checkpoint"),
+        get_async_session_context=session_context,
+        close=lambda: _record(calls, "close"),
+    )
+    monkeypatch.setattr(storage_migration, "pg_manager", manager)
+    monkeypatch.setattr(
+        storage_migration,
+        "read_v071_workdir_plan",
+        lambda _db: _async_value(V071WorkdirMigrationPlan(False, (), ())),
+    )
+    monkeypatch.setattr(storage_migration, "_legacy_skill_roots_exist", lambda: False)
+    monkeypatch.setattr(storage_migration, "_legacy_system_config_exists", lambda: False)
+    monkeypatch.setattr(storage_migration, "runtime_storage_requires_quiescence", lambda: False)
+    monkeypatch.setattr(
+        storage_migration,
+        "_converge_database_state",
+        lambda *, fail_nonterminal_runs: _record(calls, f"converge:{fail_nonterminal_runs}"),
+    )
+    monkeypatch.setattr(storage_migration, "migrate_shared_skills", lambda _db: _record(calls, "skills"))
+    monkeypatch.setattr(storage_migration, "mark_v071_skills_migrated", lambda: calls.append("mark_skills"))
+    monkeypatch.setattr(storage_migration, "migrate_runtime_storage_identity", lambda: calls.append("runtime_identity"))
+
+    await storage_migration.main()
+
+    must_run, must_skip = {
+        11: ({"ensure_category_schema", "ensure_resource_category_schema"}, {"ensure_resource_schema"}),
+        12: (
+            {"ensure_resource_category_schema"},
+            {"ensure_resource_schema", "ensure_category_schema"},
+        ),
+    }[business_version]
+    assert must_run <= set(calls)
+    assert must_skip.isdisjoint(calls)
+
+
+@pytest.mark.asyncio
 async def test_failed_business_migration_does_not_record_version(monkeypatch):
     calls: list[str] = []
 
@@ -314,6 +393,9 @@ async def test_failed_business_migration_does_not_record_version(monkeypatch):
         upgrade_agent_resource_selection=lambda: _record(
             calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
         ),
+        ensure_resource_schema=lambda: _record(calls, "ensure_resource_schema"),
+        ensure_category_schema=lambda: _record(calls, "ensure_category_schema"),
+        ensure_resource_category_schema=lambda: _record(calls, "ensure_resource_category_schema"),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create_business"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
@@ -359,6 +441,9 @@ async def test_current_schema_does_not_rewrite_workdir_data(monkeypatch):
         upgrade_agent_resource_selection=lambda: _record(
             calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
         ),
+        ensure_resource_schema=lambda: _record(calls, "ensure_resource_schema"),
+        ensure_category_schema=lambda: _record(calls, "ensure_category_schema"),
+        ensure_resource_category_schema=lambda: _record(calls, "ensure_resource_category_schema"),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
@@ -398,6 +483,7 @@ async def test_current_schema_does_not_rewrite_workdir_data(monkeypatch):
 
     assert "converge:False" in calls
     assert "schema" in calls
+    assert {"ensure_resource_schema", "ensure_category_schema", "ensure_resource_category_schema"} <= set(calls)
     assert "skills" in calls
     assert "runtime_identity" in calls
     assert {"import", "rewrite", "verify", "cleanup"}.isdisjoint(calls)

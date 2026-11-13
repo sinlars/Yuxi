@@ -1,11 +1,12 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, provide, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
-import { GithubOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import {
+  Archive,
   BarChart3,
   ClipboardList,
+  FolderTree,
   LibraryBig,
   Box,
   HardDrive,
@@ -190,6 +191,20 @@ const mainList = computed(() => {
     activePaths: ['/extensions'],
     icon: LibraryBig,
     activeIcon: LibraryBig
+  })
+
+  items.push({
+    name: '资源管理',
+    path: '/resources',
+    icon: Archive,
+    activeIcon: Archive
+  })
+
+  items.push({
+    name: '分类管理',
+    path: '/categories',
+    icon: FolderTree,
+    activeIcon: FolderTree
   })
 
   if (userStore.isSuperAdmin) {

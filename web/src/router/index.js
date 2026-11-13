@@ -99,6 +99,50 @@ const router = createRouter({
       ]
     },
     {
+      path: '/resources',
+      name: 'resources',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'ResourcesComp',
+          component: () => import('../views/ResourceManageView.vue'),
+          meta: { keepAlive: false, requiresAuth: true }
+        },
+        {
+          path: 'create',
+          name: 'ResourceCreate',
+          component: () => import('../views/ResourceEditView.vue'),
+          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+        },
+        {
+          path: ':id/edit',
+          name: 'ResourceEdit',
+          component: () => import('../views/ResourceEditView.vue'),
+          meta: { keepAlive: false, requiresAuth: true, requiresAdmin: true }
+        },
+        {
+          path: ':id',
+          name: 'ResourceDetail',
+          component: () => import('../views/ResourceEditView.vue'),
+          meta: { keepAlive: false, requiresAuth: true }
+        }
+      ]
+    },
+    {
+      path: '/categories',
+      name: 'categories',
+      component: AppLayout,
+      children: [
+        {
+          path: '',
+          name: 'CategoriesComp',
+          component: () => import('../views/CategoryManageView.vue'),
+          meta: { keepAlive: false, requiresAuth: true }
+        }
+      ]
+    },
+    {
       path: '/extensions',
       name: 'extensions',
       component: AppLayout,

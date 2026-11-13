@@ -125,7 +125,7 @@ async def main() -> None:
                 "business",
                 business_version,
                 BUSINESS_SCHEMA_VERSION,
-                upgrade_from=(2, 7, 8),
+                upgrade_from=(2, 7, 8, 9, 10, 11, 12),
             )
             knowledge_version = versions.get("knowledge")
             _require_supported_version(
@@ -151,6 +151,13 @@ async def main() -> None:
                     await pg_manager.setup_langgraph_checkpointer()
             if business_version in {None, 2, 7, 8}:
                 await pg_manager.upgrade_agent_resource_selection()
+            # 每一步只在该步版本之后执行，避免已升级的库被回写旧版本号。
+            if business_version is None or business_version < 11:
+                await pg_manager.ensure_resource_schema()
+            if business_version is None or business_version < 12:
+                await pg_manager.ensure_category_schema()
+            if business_version is None or business_version < 13:
+                await pg_manager.ensure_resource_category_schema()
 
             if knowledge_version is None:
                 await pg_manager.create_knowledge_tables()

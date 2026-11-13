@@ -282,7 +282,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "ix_scheduled_agent_runs_job_created",
             "ix_scheduled_agent_runs_dispatching",
         }.issubset(scheduled_indexes)
-        assert BUSINESS_SCHEMA_VERSION == 9
+        assert BUSINESS_SCHEMA_VERSION == 13
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
@@ -595,3 +595,50 @@ async def test_resource_selection_migration_is_atomic_and_does_not_repeat(fail_v
         assert await manager.get_schema_versions() == {"business": 9}
     finally:
         await _drop_isolated_schema(schema, admin_engine, engine)
+
+
+async def test_resource_category_schema_is_idempotent_and_records_version() -> None:
+    """资源分类标引表在真实 PostgreSQL 上可重放，并把 business 版本推进到当前值。"""
+    schema, admin_engine, scoped_engine, manager = await _create_isolated_manager("pytest_resource_category_schema")
+    try:
+        await manager.create_schema_version_table()
+        await manager.ensure_resource_schema()
+        await manager.ensure_category_schema()
+        await manager.ensure_resource_category_schema()
+        await manager.ensure_resource_category_schema()
+
+        async with scoped_engine.connect() as connection:
+            columns = set(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_schema = :schema AND table_name = 'resource_categories'"
+                        ),
+                        {"schema": schema},
+                    )
+                ).scalars()
+            )
+            foreign_keys = {
+                row.conname: row.definition
+                for row in (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT con.conname, pg_get_constraintdef(con.oid) AS definition
+                            FROM pg_constraint AS con
+                            JOIN pg_namespace AS ns ON ns.oid = con.connamespace
+                            WHERE ns.nspname = :schema AND con.contype = 'f'
+                            """
+                        ),
+                        {"schema": schema},
+                    )
+                )
+            }
+
+        assert columns == {"resource_id", "category_id", "created_by", "created_at"}
+        assert "ON DELETE CASCADE" in foreign_keys["resource_categories_resource_id_fkey"]
+        assert "ON DELETE RESTRICT" in foreign_keys["resource_categories_category_id_fkey"]
+        assert (await manager.get_schema_versions())["business"] == BUSINESS_SCHEMA_VERSION
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, scoped_engine)

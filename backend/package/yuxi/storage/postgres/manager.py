@@ -23,9 +23,115 @@ from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
 
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
-BUSINESS_SCHEMA_VERSION = 9
+BUSINESS_SCHEMA_VERSION = 13
 KNOWLEDGE_SCHEMA_VERSION = 2
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
+RESOURCE_CATEGORY_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS resource_categories (
+        resource_id INTEGER NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+        category_id INTEGER NOT NULL REFERENCES category_nodes(id) ON DELETE RESTRICT,
+        created_by VARCHAR(64),
+        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (resource_id, category_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_resource_categories_category_id ON resource_categories(category_id)",
+)
+CATEGORY_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS category_types (
+        id SERIAL PRIMARY KEY,
+        code VARCHAR(64) NOT NULL UNIQUE,
+        name VARCHAR(64) NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS category_nodes (
+        id SERIAL PRIMARY KEY,
+        category_type VARCHAR(64) NOT NULL REFERENCES category_types(code) ON DELETE RESTRICT,
+        parent_id INTEGER REFERENCES category_nodes(id) ON DELETE RESTRICT,
+        name VARCHAR(255) NOT NULL,
+        code VARCHAR(128),
+        is_leaf BOOLEAN NOT NULL DEFAULT TRUE,
+        remark TEXT NOT NULL DEFAULT '',
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        level INTEGER NOT NULL DEFAULT 1,
+        created_by VARCHAR(64),
+        updated_by VARCHAR(64),
+        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_category_nodes_category_type ON category_nodes(category_type)",
+    "CREATE INDEX IF NOT EXISTS ix_category_nodes_parent_id ON category_nodes(parent_id)",
+    "CREATE INDEX IF NOT EXISTS ix_category_nodes_type_parent ON category_nodes(category_type, parent_id)",
+    (
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_category_nodes_type_code "
+        "ON category_nodes(category_type, code) WHERE code IS NOT NULL"
+    ),
+    """
+    INSERT INTO category_types (code, name, sort_order, is_builtin)
+    VALUES
+        ('icd10', 'ICD10分类', 10, TRUE),
+        ('clc', '中图分类', 20, TRUE)
+    ON CONFLICT (code) DO NOTHING
+    """,
+)
+RESOURCE_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS resource_types (
+        id SERIAL PRIMARY KEY,
+        code VARCHAR(64) NOT NULL UNIQUE,
+        name VARCHAR(64) NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS resources (
+        id SERIAL PRIMARY KEY,
+        resource_type VARCHAR(64) NOT NULL REFERENCES resource_types(code) ON DELETE RESTRICT,
+        title VARCHAR(255) NOT NULL,
+        subtitle VARCHAR(255),
+        summary TEXT NOT NULL DEFAULT '',
+        author VARCHAR(255),
+        institution VARCHAR(255),
+        keywords JSONB NOT NULL DEFAULT '[]'::jsonb,
+        subject_terms JSONB NOT NULL DEFAULT '[]'::jsonb,
+        tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+        cover_url VARCHAR(1000),
+        content_markdown TEXT NOT NULL DEFAULT '',
+        attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
+        status VARCHAR(16) NOT NULL DEFAULT 'draft',
+        created_by VARCHAR(64),
+        updated_by VARCHAR(64),
+        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_resources_resource_type ON resources(resource_type)",
+    "CREATE INDEX IF NOT EXISTS ix_resources_type_created ON resources(resource_type, created_at)",
+    "ALTER TABLE resources ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'draft'",
+    "CREATE INDEX IF NOT EXISTS ix_resources_status ON resources(status)",
+    """
+    INSERT INTO resource_types (code, name, sort_order, is_builtin)
+    VALUES
+        ('case', '案例', 10, TRUE),
+        ('chart', '图表', 20, TRUE),
+        ('guideline', '指南共识', 30, TRUE),
+        ('video', '视频', 40, TRUE),
+        ('question', '试题', 50, TRUE),
+        ('book', '图书', 60, TRUE)
+    ON CONFLICT (code) DO NOTHING
+    """,
+)
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
     "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS worker_id VARCHAR(128)",
     "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP WITHOUT TIME ZONE",
@@ -513,6 +619,51 @@ class PostgresManager(metaclass=SingletonMeta):
                 """)
             )
 
+    async def ensure_resource_schema(self) -> None:
+        """幂等创建资源管理表、播种内置类型，并在成功后记录 business 版本 11。"""
+        self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            for statement in RESOURCE_SCHEMA_STATEMENTS:
+                await conn.execute(text(statement))
+            await conn.execute(
+                text(f"""
+                    INSERT INTO {SCHEMA_VERSION_TABLE} (domain, version, applied_at)
+                    VALUES ('business', 11, CURRENT_TIMESTAMP)
+                    ON CONFLICT (domain) DO UPDATE
+                    SET version = 11, applied_at = EXCLUDED.applied_at
+                """)
+            )
+
+    async def ensure_category_schema(self) -> None:
+        """幂等创建分类类型与树节点表、播种内置类型，并记录 business 版本 12。"""
+        self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            for statement in CATEGORY_SCHEMA_STATEMENTS:
+                await conn.execute(text(statement))
+            await conn.execute(
+                text(f"""
+                    INSERT INTO {SCHEMA_VERSION_TABLE} (domain, version, applied_at)
+                    VALUES ('business', 12, CURRENT_TIMESTAMP)
+                    ON CONFLICT (domain) DO UPDATE
+                    SET version = 12, applied_at = EXCLUDED.applied_at
+                """)
+            )
+
+    async def ensure_resource_category_schema(self) -> None:
+        """幂等创建资源分类标引关联表，并记录 business 版本 13。"""
+        self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            for statement in RESOURCE_CATEGORY_SCHEMA_STATEMENTS:
+                await conn.execute(text(statement))
+            await conn.execute(
+                text(f"""
+                    INSERT INTO {SCHEMA_VERSION_TABLE} (domain, version, applied_at)
+                    VALUES ('business', {BUSINESS_SCHEMA_VERSION}, CURRENT_TIMESTAMP)
+                    ON CONFLICT (domain) DO UPDATE
+                    SET version = EXCLUDED.version, applied_at = EXCLUDED.applied_at
+                """)
+            )
+
     async def record_schema_version(self, domain: str, version: int) -> None:
         """在对应域迁移完整成功后记录当前版本。"""
         self._check_initialized()
@@ -543,7 +694,7 @@ class PostgresManager(metaclass=SingletonMeta):
         ]
         if mismatches:
             detail = ", ".join(mismatches)
-            #raise RuntimeError(f"Database schema migration is incomplete or incompatible: {detail}")
+            raise RuntimeError(f"Database schema migration is incomplete or incompatible: {detail}")
 
     async def create_knowledge_tables(self):
         """创建知识与评估表。"""

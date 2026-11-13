@@ -1389,3 +1389,196 @@ Index(
     AgentRunRequest.created_at,
     AgentRunRequest.id,
 )
+
+
+class ResourceType(Base):
+    """资源类型字典；内置类型由迁移器播种，管理员可增删自定义类型。"""
+
+    __tablename__ = "resource_types"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="Primary key")
+    code = Column(String(64), nullable=False, unique=True, comment="类型编码，资源表以其为外键")
+    name = Column(String(64), nullable=False, comment="类型展示名称")
+    sort_order = Column(Integer, nullable=False, default=0, server_default="0", comment="列表排序值")
+    is_builtin = Column(Boolean, nullable=False, default=False, server_default="false", comment="是否内置类型")
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive, server_default=func.now())
+    updated_at = Column(
+        DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive, server_default=func.now()
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "code": self.code,
+            "name": self.name,
+            "sort_order": self.sort_order,
+            "is_builtin": bool(self.is_builtin),
+            "created_at": format_utc_datetime(self.created_at),
+            "updated_at": format_utc_datetime(self.updated_at),
+        }
+
+
+class Resource(Base):
+    """统一资源条目；正文以 Markdown 原文保存，附件引用对象存储 URL。"""
+
+    __tablename__ = "resources"
+    __table_args__ = (
+        Index("ix_resources_type_created", "resource_type", "created_at"),
+        Index("ix_resources_status", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="Primary key")
+    resource_type = Column(
+        String(64),
+        ForeignKey("resource_types.code", ondelete="RESTRICT", name="fk_resources_type"),
+        nullable=False,
+        index=True,
+        comment="资源类型编码",
+    )
+    title = Column(String(255), nullable=False, comment="标题")
+    subtitle = Column(String(255), nullable=True, comment="副标题")
+    summary = Column(Text, nullable=False, default="", server_default="", comment="摘要或简介")
+    author = Column(String(255), nullable=True, comment="作者")
+    institution = Column(String(255), nullable=True, comment="所属机构")
+    keywords = Column(JSON, nullable=False, default=list, comment="关键词列表")
+    subject_terms = Column(JSON, nullable=False, default=list, comment="主题词列表")
+    tags = Column(JSON, nullable=False, default=list, comment="标签列表")
+    cover_url = Column(String(1000), nullable=True, comment="封面或缩略图 URL")
+    content_markdown = Column(Text, nullable=False, default="", server_default="", comment="富文本正文（Markdown）")
+    attachments = Column(JSON, nullable=False, default=list, comment="附件对象列表")
+    status = Column(
+        String(16),
+        nullable=False,
+        default="draft",
+        server_default="draft",
+        comment="资源状态：draft 编辑中 / published 已发布",
+    )
+    created_by = Column(String(64), nullable=True, comment="创建人 UID")
+    updated_by = Column(String(64), nullable=True, comment="最后修改人 UID")
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive, server_default=func.now())
+    updated_at = Column(
+        DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive, server_default=func.now()
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "resource_type": self.resource_type,
+            "title": self.title,
+            "subtitle": self.subtitle,
+            "summary": self.summary or "",
+            "author": self.author,
+            "institution": self.institution,
+            "keywords": self.keywords or [],
+            "subject_terms": self.subject_terms or [],
+            "tags": self.tags or [],
+            "cover_url": normalize_public_minio_url(self.cover_url),
+            "content_markdown": self.content_markdown or "",
+            "attachments": self.attachments or [],
+            "status": self.status,
+            "created_by": self.created_by,
+            "updated_by": self.updated_by,
+            "created_at": format_utc_datetime(self.created_at),
+            "updated_at": format_utc_datetime(self.updated_at),
+        }
+
+
+class CategoryType(Base):
+    """分类类型字典；迁移器播种内置类型，作为分类树的命名空间。"""
+
+    __tablename__ = "category_types"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="Primary key")
+    code = Column(String(64), nullable=False, unique=True, comment="类型编码，分类节点以其为外键")
+    name = Column(String(64), nullable=False, comment="类型展示名称")
+    sort_order = Column(Integer, nullable=False, default=0, server_default="0", comment="列表排序值")
+    is_builtin = Column(Boolean, nullable=False, default=False, server_default="false", comment="是否内置类型")
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive, server_default=func.now())
+    updated_at = Column(
+        DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive, server_default=func.now()
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "code": self.code,
+            "name": self.name,
+            "sort_order": self.sort_order,
+            "is_builtin": bool(self.is_builtin),
+            "created_at": format_utc_datetime(self.created_at),
+            "updated_at": format_utc_datetime(self.updated_at),
+        }
+
+
+class CategoryNode(Base):
+    """分类树节点；层级与叶子标记由 service 按同类型节点结构同步。"""
+
+    __tablename__ = "category_nodes"
+    __table_args__ = (Index("ix_category_nodes_type_parent", "category_type", "parent_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="Primary key")
+    category_type = Column(
+        String(64),
+        ForeignKey("category_types.code", ondelete="RESTRICT", name="fk_category_nodes_type"),
+        nullable=False,
+        index=True,
+        comment="分类类型编码",
+    )
+    parent_id = Column(
+        Integer,
+        ForeignKey("category_nodes.id", ondelete="RESTRICT", name="fk_category_nodes_parent"),
+        nullable=True,
+        index=True,
+        comment="父节点 ID；空值表示根节点",
+    )
+    name = Column(String(255), nullable=False, comment="分类名称")
+    code = Column(String(128), nullable=True, comment="分类编码，同类型内唯一")
+    is_leaf = Column(Boolean, nullable=False, default=True, server_default="true", comment="是否叶子节点")
+    remark = Column(Text, nullable=False, default="", server_default="", comment="备注")
+    enabled = Column(Boolean, nullable=False, default=True, server_default="true", comment="是否启用")
+    level = Column(Integer, nullable=False, default=1, server_default="1", comment="当前层级，根节点为 1")
+    created_by = Column(String(64), nullable=True, comment="创建人 UID")
+    updated_by = Column(String(64), nullable=True, comment="最后修改人 UID")
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive, server_default=func.now())
+    updated_at = Column(
+        DateTime, nullable=False, default=utc_now_naive, onupdate=utc_now_naive, server_default=func.now()
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "category_type": self.category_type,
+            "parent_id": self.parent_id,
+            "name": self.name,
+            "code": self.code,
+            "is_leaf": bool(self.is_leaf),
+            "remark": self.remark or "",
+            "enabled": bool(self.enabled),
+            "level": self.level,
+            "created_by": self.created_by,
+            "updated_by": self.updated_by,
+            "created_at": format_utc_datetime(self.created_at),
+            "updated_at": format_utc_datetime(self.updated_at),
+        }
+
+
+class ResourceCategory(Base):
+    """资源分类标引关联；同一资源与分类仅保留一条。"""
+
+    __tablename__ = "resource_categories"
+    __table_args__ = (Index("ix_resource_categories_category_id", "category_id"),)
+
+    resource_id = Column(
+        Integer,
+        ForeignKey("resources.id", ondelete="CASCADE", name="fk_resource_categories_resource"),
+        primary_key=True,
+        comment="资源 ID",
+    )
+    category_id = Column(
+        Integer,
+        ForeignKey("category_nodes.id", ondelete="RESTRICT", name="fk_resource_categories_category"),
+        primary_key=True,
+        comment="分类节点 ID",
+    )
+    created_by = Column(String(64), nullable=True, comment="标引人 UID")
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive, server_default=func.now())

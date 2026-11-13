@@ -6,6 +6,7 @@ from server.routers.agent_invocation_eval_router import agent_invocation_eval_ro
 from server.routers.agent_router import agent_router
 from server.routers.auth_dept_router import department
 from server.routers.auth_router import auth
+from server.routers.category_router import categories
 from server.routers.chat_router import chat
 from server.routers.dashboard_router import dashboard
 from server.routers.external_kb_router import external_kb
@@ -18,6 +19,7 @@ from server.routers.mcp_router import mcp
 from server.routers.mention_router import mention_router
 from server.routers.model_provider_router import model_providers
 from server.routers.project_router import projects
+from server.routers.resource_router import resources
 from server.routers.scheduled_agent_router import scheduled_agents
 from server.routers.skill_router import skills, user_skills
 from server.routers.system_router import system
@@ -37,6 +39,8 @@ router.include_router(agent_invocation_channel_router)  # /api/agent-invocation/
 router.include_router(agent_invocation_eval_router)  # /api/agent-invocation/eval/*
 router.include_router(chat)  # /api/chat/* 对话线程、消息历史与附件
 router.include_router(projects)  # /api/projects* 项目创建与选择
+router.include_router(resources)  # /api/resources/* 资源管理（类型字典、资源条目与上传）
+router.include_router(categories)  # /api/categories/* 分类管理（类型切换与树节点）
 router.include_router(scheduled_agents)  # /api/scheduled-tasks* 用户自建 Agent 定时任务
 
 # 管理与工作台接口：后台任务、权限域以及工具体系配置。
